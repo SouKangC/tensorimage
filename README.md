@@ -2,7 +2,7 @@
 
 Fast image loading for Python. Built in Rust.
 
-A drop-in replacement for `PIL.Image.open()` that decodes and resizes images **5x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy.
+A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and normalizes images **5x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy. Includes fused pipeline and parallel batch loading via rayon.
 
 ## Quickstart
 
@@ -19,11 +19,14 @@ img = ti.load("photo.jpg")
 # Load and resize — shortest edge becomes 512, aspect ratio preserved
 img = ti.load("photo.jpg", size=512)
 
-# Choose a resize algorithm
-img = ti.load("photo.jpg", size=256, algorithm="bilinear")
+# Full ML pipeline — resize, center crop, normalize → f32 (3, 224, 224) ready for PyTorch
+tensor = ti.load("photo.jpg", size=224, crop="center", normalize="imagenet")
+
+# Batch loading — parallel via rayon, returns stacked (N, 3, 224, 224) ndarray
+batch = ti.load_batch(paths, size=224, crop="center", normalize="imagenet")
 ```
 
-That's it. No `Image.open()`, no `.convert("RGB")`, no `np.array()` wrapper. One call, one array.
+That's it. No `Image.open()`, no `.convert("RGB")`, no manual normalize+transpose. One call, one tensor.
 
 ## Why tensorimage?
 
@@ -56,21 +59,46 @@ Each step allocates memory and copies data. tensorimage replaces all of it with 
 
 ## API
 
-### `ti.load(path, size=None, algorithm=None)`
+### `ti.load(path, size=None, algorithm=None, crop=None, normalize=None)`
 
-Load an image file and return a `numpy.ndarray` with shape `(H, W, 3)` and dtype `uint8`.
+Load an image file and return a numpy array.
 
 | Parameter | Type | Description |
 |---|---|---|
 | `path` | `str` | Path to image file (JPEG or PNG) |
 | `size` | `int` or `None` | Target shortest edge size. Preserves aspect ratio. `None` = no resize. |
 | `algorithm` | `str` or `None` | Resize algorithm. Default: `"lanczos3"` |
+| `crop` | `str` or `None` | Crop mode. `"center"` = center crop to `size x size`. Requires `size`. |
+| `normalize` | `str` or `None` | Normalize preset. Converts to `float32` CHW layout. |
+
+**Returns:**
+- Without `normalize`: `uint8` array with shape `(H, W, 3)` (HWC layout)
+- With `normalize`: `float32` array with shape `(3, H, W)` (CHW layout)
+
+**Normalize presets:** `"imagenet"` (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), `"clip"`, `"[-1,1]"`
 
 **Supported algorithms:** `nearest`, `bilinear`, `catmullrom`, `mitchell`, `lanczos3`
 
 **Supported formats:** JPEG, PNG. RGBA and grayscale images are automatically converted to RGB.
 
-**Raises:** `ValueError` on file not found, corrupt image, or invalid algorithm name.
+**Raises:** `ValueError` on file not found, corrupt image, invalid algorithm name, or invalid crop/normalize option.
+
+### `ti.load_batch(paths, size=None, algorithm=None, crop=None, normalize=None, workers=None)`
+
+Load multiple images in parallel using a rayon thread pool.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `paths` | `list[str]` | List of image file paths |
+| `size` | `int` or `None` | Target shortest edge size |
+| `algorithm` | `str` or `None` | Resize algorithm. Default: `"lanczos3"` |
+| `crop` | `str` or `None` | Crop mode. `"center"` = center crop to `size x size`. |
+| `normalize` | `str` or `None` | Normalize preset |
+| `workers` | `int` or `None` | Number of worker threads. Default: number of CPU cores. |
+
+**Returns:**
+- With `normalize` + `crop` (all images same size): contiguous `float32` array with shape `(N, 3, H, W)`
+- Otherwise: Python list of individual arrays
 
 ### Examples
 
@@ -86,12 +114,18 @@ print(img.dtype)  # uint8
 img = ti.load("photo.jpg", size=512)
 print(img.shape)  # (512, 910, 3)  — shortest edge = 512
 
+# Full ML preprocessing pipeline — one call, ready for PyTorch
+tensor = ti.load("photo.jpg", size=224, crop="center", normalize="imagenet")
+print(tensor.shape)  # (3, 224, 224)
+print(tensor.dtype)  # float32
+
+# Batch loading — parallel decode+resize+crop+normalize
+paths = ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]
+batch = ti.load_batch(paths, size=224, crop="center", normalize="imagenet")
+print(batch.shape)  # (4, 3, 224, 224)
+
 # Fast nearest-neighbor for previews
 thumb = ti.load("photo.jpg", size=128, algorithm="nearest")
-
-# Works with any framework
-import torch
-tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
 ```
 
 ## Building from source
@@ -128,38 +162,50 @@ RGB pixels at reduced resolution
   v
 RGB pixels at exact target size
   |
+  |  center_crop (single allocation, row-by-row copy)
+  v
+RGB pixels at crop size
+  |
+  |  fused normalize + HWC→CHW transpose (single pass, pre-computed scale/bias)
+  v
+float32 pixels in CHW layout
+  |
   |  PyArray::from_vec (zero-copy ownership transfer to numpy)
   v
-numpy.ndarray (H, W, 3) uint8
+numpy.ndarray (3, H, W) float32   — or (H, W, 3) uint8 without normalize
 ```
 
-The GIL is released during decode and resize, so other Python threads can run concurrently.
+The GIL is released during all Rust work. Batch loading runs images in parallel via a rayon thread pool.
 
 ## Project structure
 
 ```
 tensorimage/
 ├── crates/
-│   ├── tensorimage-core/       # Pure Rust — decode, resize, error handling
+│   ├── tensorimage-core/       # Pure Rust — decode, resize, crop, normalize, pipeline, batch
 │   │   └── src/
 │   │       ├── decode.rs       # JPEG (turbojpeg) + PNG (image crate) decoding
 │   │       ├── resize.rs       # SIMD resize via fast_image_resize
+│   │       ├── crop.rs         # Center crop
+│   │       ├── normalize.rs    # Fused normalize + HWC→CHW transpose
+│   │       ├── pipeline.rs     # Chained decode→resize→crop→normalize
+│   │       ├── batch.rs        # Parallel batch loading via rayon
 │   │       └── error.rs        # Error types
 │   └── tensorimage-python/     # PyO3 bindings
 │       └── src/
 │           ├── lib.rs          # Python module definition
-│           └── load.rs         # load() function with GIL release + zero-copy
+│           └── load.rs         # load() + load_batch() with GIL release + zero-copy
 ├── python/tensorimage/         # Python package
-│   └── __init__.py             # Re-exports load() from Rust
+│   └── __init__.py             # Re-exports load(), load_batch() from Rust
 ├── tests/
-│   └── test_decode.py          # 20 tests: decode, resize, color conversion, errors
+│   └── test_decode.py          # 45 tests: decode, resize, crop, normalize, pipeline, batch
 └── benches/
-    └── compare.py              # Benchmark vs PIL
+    └── compare.py              # Benchmark vs PIL (resize, pipeline, batch)
 ```
 
 ## Roadmap
 
-### Phase 1: Core decode + resize (current)
+### Phase 1: Core decode + resize ✅
 
 `ti.load("image.jpg", size=512)` returns a numpy array, 5x+ faster than PIL.
 
@@ -172,14 +218,19 @@ tensorimage/
 - [x] GIL released during all Rust work
 - [x] 20 correctness tests including pixel-level comparison vs PIL
 
-### Phase 2: Fused pipeline + batch loading
+### Phase 2: Fused pipeline + batch loading ✅ (current)
 
-Single fused pipeline, batch parallel loading.
+`ti.load("img.jpg", size=224, crop="center", normalize="imagenet")` returns a `float32 [3, 224, 224]` tensor ready for PyTorch.
 
-- `ti.load("img.jpg", size=512, crop="center", normalize="imagenet")`
-- Fused operations (resize+crop in one pass, avoid intermediate allocations)
-- Batch loading with rayon: `ti.load_batch(paths, workers=8)`
-- Normalize presets: `"imagenet"`, `"[-1,1]"`, `"clip"`, custom mean/std
+- [x] Center crop (`crop="center"`)
+- [x] Fused normalize + HWC→CHW transpose in a single pass (no intermediate allocations)
+- [x] Normalize presets: `"imagenet"`, `"clip"`, `"[-1,1]"`
+- [x] Chained pipeline: decode → resize → crop → normalize
+- [x] Parallel batch loading via rayon: `ti.load_batch(paths, workers=8)`
+- [x] Batches with uniform size stack into contiguous `[N, 3, H, W]` ndarray
+- [x] Pixel-exact match vs manual numpy normalization (atol=1e-5)
+- [x] Full backward compatibility with Phase 1 API
+- [x] 45 tests total (20 Phase 1 + 25 Phase 2)
 
 ### Phase 3: torchvision.transforms compatibility
 

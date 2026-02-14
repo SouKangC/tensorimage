@@ -16,6 +16,12 @@ pub enum TensorImageError {
 
     #[error("Invalid parameter: {0}")]
     InvalidParam(String),
+
+    #[error("Crop error: {0}")]
+    Crop(String),
+
+    #[error("Normalize error: {0}")]
+    Normalize(String),
 }
 
 pub type Result<T> = std::result::Result<T, TensorImageError>;
