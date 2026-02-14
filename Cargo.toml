@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/tensorimage-core", "crates/tensorimage-python"]
+resolver = "2"

@@ -1,0 +1,10 @@
+[package]
+name = "tensorimage-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+fast_image_resize = "6"
+thiserror = "2"
+turbojpeg = "1.3"

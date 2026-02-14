@@ -1,0 +1,11 @@
+/target
+/.venv
+__pycache__
+*.pyc
+*.so
+*.dylib
+*.egg-info
+/dist
+/build
+.pytest_cache
+tests/fixtures/realistic_4k.jpg
