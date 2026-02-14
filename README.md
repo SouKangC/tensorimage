@@ -50,12 +50,13 @@ Each step allocates memory and copies data. tensorimage replaces all of it with 
 
 ### Benchmark
 
-4000x2000 JPEG resized to 512px shortest edge, 100 iterations, Apple M4:
+4000x2000 JPEG → 512px shortest edge, 100 iterations, Apple M4:
 
-| Library | Median | Speedup |
-|---|---|---|
-| PIL (Pillow) | 41.4 ms | 1x |
-| **tensorimage** | **8.0 ms** | **5.2x** |
+| Task | tensorimage | PIL + numpy | Speedup |
+|---|---|---|---|
+| Resize only | **7.9 ms** | 41.0 ms | **5.2x** |
+| Full pipeline (resize + crop + normalize) | **8.3 ms** | 42.6 ms | **5.2x** |
+| Batch (8 images, 4 workers) | **17.3 ms** | 345.1 ms | **20x** |
 
 ## API
 
