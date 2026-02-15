@@ -95,17 +95,19 @@ End-to-end GPU pipeline: file → CUDA tensor with no CPU→GPU copies. `pip ins
 - [x] No new Rust dependencies — hand-rolled DCT, area-average resize, BT.601 grayscale
 - [x] 31 tests (28 pass without torch, 3 skipped for aesthetic scoring)
 
-## Phase 8: Extended format support + real-world robustness
+## Phase 8: Extended format support + real-world robustness ✅
 
 `ti.load_bytes(data, size=224)` — load from bytes (S3, HTTP). WebP/AVIF decode. EXIF auto-rotation.
 
-- [ ] Enable WebP and AVIF features in `image` crate (adds decode support via existing fallback path)
-- [ ] Optimized WebP decode via `libwebp` (direct C bindings, skip `image` crate overhead)
-- [ ] EXIF orientation auto-correction: read tag from JPEG, rotate/flip before returning
-- [ ] `ti.load_bytes(data, ...)` Python API — same parameters as `ti.load()` but accepts `bytes`
-- [ ] `ti.load_batch_bytes(data_list, ...)` for parallel bytes decoding
-- [ ] `ti.image_info(path)` single-file Python API (complement to existing batch version)
-- [ ] New Rust dependency: `kamadak-exif` (lightweight EXIF parser)
+- [x] Enable WebP and AVIF features in `image` crate (adds decode support via existing fallback path)
+- [x] Optimized WebP decode via `libwebp` (direct C bindings, `webp` crate fast path)
+- [x] EXIF orientation auto-correction: read tag from JPEG, rotate/flip before returning (orientations 1-8)
+- [x] `ti.load_bytes(data, ...)` Python API — same parameters as `ti.load()` but accepts `bytes`
+- [x] `ti.load_batch_bytes(data_list, ...)` for parallel bytes decoding (with contiguous buffer fast path)
+- [x] `ti.image_info(path)` single-file Python API (complement to existing batch version)
+- [x] New Rust dependencies: `kamadak-exif` (EXIF parser), `webp` (libwebp C bindings)
+- [x] Refactored `pipeline.rs` to share resize/crop logic between file and bytes paths
+- [x] 21 new tests (187 total): WebP loading, EXIF orientations, bytes API, batch bytes, image_info
 
 ## Phase 9: Rust-accelerated augmentations
 

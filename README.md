@@ -11,7 +11,9 @@ A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and n
 - **Drop-in torchvision.transforms** replacement with auto-fused Rust fast-path
 - **Zero-copy** numpy output and PyTorch tensor support (`device="cpu"` / `"cuda"`)
 - **Dataset filtering** with perceptual hash dedup (3-27x faster than imagehash) and CLIP aesthetic scoring
-- JPEG + PNG, RGBA/grayscale auto-converted to RGB
+- **JPEG, PNG, WebP, AVIF** with RGBA/grayscale auto-converted to RGB
+- **EXIF orientation** auto-correction for phone photos
+- **Bytes API** (`load_bytes`, `load_batch_bytes`) for S3/HTTP workflows
 
 ## Installation
 
@@ -38,6 +40,23 @@ batch = ti.load_batch(paths, size=224, crop="center", normalize="imagenet")
 ```
 
 No `Image.open()`, no `.convert("RGB")`, no manual normalize+transpose. One call, one tensor.
+
+### Loading from bytes (S3, HTTP, etc.)
+
+```python
+import tensorimage as ti
+
+# Load from in-memory bytes — same parameters as ti.load()
+data = open("photo.webp", "rb").read()  # or from S3, HTTP response, etc.
+img = ti.load_bytes(data, size=224, crop="center", normalize="imagenet")
+
+# Parallel batch loading from bytes
+data_list = [open(p, "rb").read() for p in paths]
+batch = ti.load_batch_bytes(data_list, size=224, crop="center", normalize="imagenet")
+
+# Quick dimension check (header-only, no decode)
+w, h = ti.image_info("photo.jpg")
+```
 
 ### PyTorch integration
 
@@ -155,7 +174,7 @@ Load an image file and return a numpy array or torch.Tensor.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `path` | `str` | required | Image file path (JPEG or PNG) |
+| `path` | `str` | required | Image file path (JPEG, PNG, WebP, AVIF) |
 | `size` | `int` | `None` | Target shortest edge size. Preserves aspect ratio. |
 | `algorithm` | `str` | `"lanczos3"` | `"nearest"`, `"bilinear"`, `"catmullrom"`, `"mitchell"`, `"lanczos3"` |
 | `crop` | `str` | `None` | `"center"` = center crop to `size x size`. Requires `size`. |
@@ -169,6 +188,18 @@ Load an image file and return a numpy array or torch.Tensor.
 Load multiple images in parallel. Same parameters as `load()`, plus `workers` (default: CPU count).
 
 **Returns:** With `normalize` + `crop`: contiguous `(N, 3, H, W)` float32. Otherwise: list of individual arrays.
+
+### `ti.load_bytes(data, size=None, algorithm=None, crop=None, normalize=None, device=None)`
+
+Load an image from raw bytes. Same parameters as `load()`, but accepts `bytes` instead of a file path. Useful for S3/HTTP workflows where image data is already in memory.
+
+### `ti.load_batch_bytes(data_list, size=None, algorithm=None, crop=None, normalize=None, workers=None, device=None)`
+
+Load multiple images from raw bytes in parallel. Same parameters as `load_batch()`, but accepts `list[bytes]`.
+
+### `ti.image_info(path)`
+
+Read image dimensions without decoding (header-only, very fast). Returns `(width, height)` tuple.
 
 ### `ti.phash(path_or_array, algorithm="dhash")`
 
@@ -225,11 +256,13 @@ Export a numpy array or torch tensor via DLPack for framework-agnostic interop.
 ## How it works
 
 ```
-JPEG file on disk
+Image file on disk (JPEG, PNG, WebP, AVIF)
   |  std::fs::read (single syscall)
   v
 Raw bytes in memory
-  |  libjpeg-turbo IDCT scaling (decode at 1/4 resolution if target is small)
+  |  Format routing: JPEG → turbojpeg, WebP → libwebp, other → image crate
+  |  JPEG: IDCT scaling (decode at 1/4 resolution if target is small)
+  |  JPEG: EXIF orientation auto-correction (rotate/flip as needed)
   v
 RGB pixels at reduced resolution
   |  fused resize+crop: SIMD Lanczos with source-space crop (single resampling pass)
@@ -271,12 +304,13 @@ tensorimage/
 ├── crates/
 │   ├── tensorimage-core/       # Pure Rust library
 │   │   └── src/
-│   │       ├── decode.rs       # JPEG (turbojpeg) + PNG (image crate) decoding
+│   │       ├── decode.rs       # JPEG (turbojpeg), WebP (libwebp), PNG/AVIF (image crate)
+│   │       ├── exif.rs         # EXIF orientation parsing + pixel transforms
 │   │       ├── resize.rs       # SIMD resize via fast_image_resize
 │   │       ├── crop.rs         # Center crop
 │   │       ├── normalize.rs    # Fused normalize + HWC->CHW transpose
-│   │       ├── pipeline.rs     # Chained decode->resize->crop->normalize
-│   │       ├── batch.rs        # Parallel batch loading via rayon
+│   │       ├── pipeline.rs     # Chained decode->resize->crop->normalize (file + bytes)
+│   │       ├── batch.rs        # Parallel batch loading via rayon (file + bytes)
 │   │       ├── pool.rs         # Shared rayon thread pool
 │   │       ├── phash.rs        # Perceptual hashing (dHash, pHash)
 │   │       ├── dedup.rs        # Parallel deduplication
@@ -291,15 +325,14 @@ tensorimage/
 │   ├── __init__.py             # Public API
 │   ├── transforms.py           # torchvision.transforms replacement
 │   └── aesthetic.py            # CLIP aesthetic scoring (optional)
-├── tests/                      # 166 tests
+├── tests/                      # 187 tests
 └── benches/                    # Benchmarks vs PIL and torchvision
 ```
 
 ## Roadmap
 
-Phases 1-5 and 7 are complete. Upcoming:
+Phases 1-5, 7, and 8 are complete. Upcoming:
 
-- **Phase 8**: Extended formats (WebP, AVIF), EXIF auto-rotation, `load_bytes()` API for S3/HTTP workflows
 - **Phase 9**: Rust-accelerated augmentations (GaussianBlur, RandomRotation, RandomAffine, and more)
 - **Phase 10**: PyTorch Dataset & DataLoader integration (`ImageFolder`, `ImageDataset`, optimized collation)
 - **Phase 6**: GPU decode via NVJPEG — end-to-end CUDA pipeline
