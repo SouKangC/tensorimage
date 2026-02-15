@@ -14,8 +14,20 @@ fn is_jpeg(path: &Path, bytes: &[u8]) -> bool {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg")
     } else {
-        bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8
+        is_jpeg_bytes(bytes)
     }
+}
+
+/// Detect JPEG from magic bytes only.
+fn is_jpeg_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8
+}
+
+/// Detect WebP from magic bytes: RIFF....WEBP
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12
+        && &bytes[0..4] == b"RIFF"
+        && &bytes[8..12] == b"WEBP"
 }
 
 /// Decode a JPEG using turbojpeg (libjpeg-turbo).
@@ -72,7 +84,25 @@ fn decode_jpeg(bytes: &[u8], target_shortest_edge: Option<u32>) -> Result<Decode
     })
 }
 
-/// Decode a non-JPEG image using the `image` crate (handles PNG, etc.).
+/// Decode a WebP image using the `webp` crate (libwebp C bindings).
+fn decode_webp(bytes: &[u8]) -> Result<DecodedImage> {
+    let decoder = webp::Decoder::new(bytes);
+    let webp_image = decoder
+        .decode()
+        .ok_or_else(|| TensorImageError::Decode("Failed to decode WebP image".into()))?;
+
+    // Convert to DynamicImage then to RGB8 — handles both RGB and RGBA WebP
+    let rgb = webp_image.to_image().into_rgb8();
+    let (w, h) = rgb.dimensions();
+    Ok(DecodedImage {
+        data: rgb.into_raw(),
+        width: w,
+        height: h,
+        channels: 3,
+    })
+}
+
+/// Decode a non-JPEG, non-WebP image using the `image` crate (handles PNG, AVIF, etc.).
 fn decode_other(bytes: &[u8]) -> Result<DecodedImage> {
     let img =
         image::load_from_memory(bytes).map_err(|e| TensorImageError::Decode(e.to_string()))?;
@@ -86,21 +116,52 @@ fn decode_other(bytes: &[u8]) -> Result<DecodedImage> {
     })
 }
 
-/// Decode an image file. For JPEG, uses turbojpeg with optional IDCT scaling.
+/// Decode an image file. Routes: JPEG → WebP → fallback.
+/// Applies EXIF orientation correction for JPEG files.
 pub fn decode_file(path: &Path, target_shortest_edge: Option<u32>) -> Result<DecodedImage> {
     let bytes = std::fs::read(path)?;
-    if is_jpeg(path, &bytes) {
-        decode_jpeg(&bytes, target_shortest_edge)
+
+    // Only read EXIF from JPEG — WebP/AVIF decoders handle orientation internally
+    let orientation = if is_jpeg(path, &bytes) || is_jpeg_bytes(&bytes) {
+        crate::exif::read_exif_orientation(&bytes)
     } else {
-        decode_other(&bytes)
-    }
+        None
+    };
+
+    let image = if is_jpeg(path, &bytes) {
+        decode_jpeg(&bytes, target_shortest_edge)?
+    } else if is_webp(&bytes) {
+        decode_webp(&bytes)?
+    } else {
+        decode_other(&bytes)?
+    };
+
+    Ok(match orientation {
+        Some(o) if o != 1 => crate::exif::apply_orientation(image, o),
+        _ => image,
+    })
 }
 
-/// Decode from raw bytes (format auto-detected).
+/// Decode from raw bytes (format auto-detected via magic bytes).
+/// Applies EXIF orientation correction for JPEG data.
 pub fn decode_bytes(bytes: &[u8], target_shortest_edge: Option<u32>) -> Result<DecodedImage> {
-    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
-        decode_jpeg(bytes, target_shortest_edge)
+    // Only read EXIF from JPEG
+    let orientation = if is_jpeg_bytes(bytes) {
+        crate::exif::read_exif_orientation(bytes)
     } else {
-        decode_other(bytes)
-    }
+        None
+    };
+
+    let image = if is_jpeg_bytes(bytes) {
+        decode_jpeg(bytes, target_shortest_edge)?
+    } else if is_webp(bytes) {
+        decode_webp(bytes)?
+    } else {
+        decode_other(bytes)?
+    };
+
+    Ok(match orientation {
+        Some(o) if o != 1 => crate::exif::apply_orientation(image, o),
+        _ => image,
+    })
 }

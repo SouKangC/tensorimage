@@ -1,11 +1,14 @@
 from tensorimage._tensorimage import (
     load as _rust_load,
     load_batch as _rust_load_batch,
+    load_bytes as _rust_load_bytes,
+    load_batch_bytes as _rust_load_batch_bytes,
     compute_phash as _rust_phash,
     phash_array as _rust_phash_array,
     phash_batch as _rust_phash_batch,
     hamming_distance,
     deduplicate as _rust_deduplicate,
+    image_info as _rust_image_info,
     image_info_batch as _rust_image_info_batch,
 )
 from tensorimage import transforms
@@ -13,6 +16,9 @@ from tensorimage import transforms
 __all__ = [
     "load",
     "load_batch",
+    "load_bytes",
+    "load_batch_bytes",
+    "image_info",
     "transforms",
     "to_dlpack",
     "phash",
@@ -84,6 +90,68 @@ def load_batch(paths, size=None, algorithm=None, crop=None, normalize=None,
             return [_numpy_to_torch(arr, device) for arr in result]
         return _numpy_to_torch(result, device)
     return result
+
+
+def load_bytes(data, size=None, algorithm=None, crop=None, normalize=None, device=None):
+    """Load an image from raw bytes and return a numpy array (or torch.Tensor).
+
+    Same parameters as load(), but accepts bytes instead of a file path.
+    Useful for S3/HTTP workflows where image data is already in memory.
+
+    Args:
+        data: Raw image bytes (JPEG, PNG, WebP, AVIF).
+        size: Target shortest edge size. None = no resize.
+        algorithm: Resize algorithm. Default: "lanczos3".
+        crop: Crop mode. "center" = center crop to size x size.
+        normalize: Normalize preset ("imagenet", "clip", "[-1,1]").
+        device: If set, return a torch.Tensor on this device.
+
+    Returns:
+        numpy.ndarray or torch.Tensor depending on device parameter.
+    """
+    arr = _rust_load_bytes(data, size=size, algorithm=algorithm, crop=crop, normalize=normalize)
+    if device is not None:
+        return _numpy_to_torch(arr, device)
+    return arr
+
+
+def load_batch_bytes(data_list, size=None, algorithm=None, crop=None, normalize=None,
+                     workers=None, device=None):
+    """Load multiple images from raw bytes in parallel.
+
+    Same parameters as load_batch(), but accepts a list of bytes objects.
+
+    Args:
+        data_list: List of raw image bytes.
+        size: Target shortest edge size.
+        algorithm: Resize algorithm. Default: "lanczos3".
+        crop: Crop mode. "center" = center crop to size x size.
+        normalize: Normalize preset.
+        workers: Number of worker threads. Default: number of CPU cores.
+        device: If set, return torch.Tensor(s) on this device.
+
+    Returns:
+        numpy.ndarray, list[numpy.ndarray], torch.Tensor, or list[torch.Tensor].
+    """
+    result = _rust_load_batch_bytes(data_list, size=size, algorithm=algorithm, crop=crop,
+                                    normalize=normalize, workers=workers)
+    if device is not None:
+        if isinstance(result, list):
+            return [_numpy_to_torch(arr, device) for arr in result]
+        return _numpy_to_torch(result, device)
+    return result
+
+
+def image_info(path):
+    """Read image dimensions without decoding (header-only, very fast).
+
+    Args:
+        path: Path to an image file.
+
+    Returns:
+        Tuple of (width, height).
+    """
+    return _rust_image_info(path)
 
 
 def to_dlpack(array):

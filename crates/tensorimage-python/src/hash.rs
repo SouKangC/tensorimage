@@ -143,6 +143,21 @@ pub fn deduplicate<'py>(
     Ok(dict.into_any().unbind())
 }
 
+/// Read image dimensions for a single file (header-only, no decode).
+///
+/// Args:
+///     path: Path to an image file.
+///
+/// Returns:
+///     Tuple of (width, height).
+#[pyfunction]
+pub fn image_info(py: Python<'_>, path: &str) -> PyResult<(u32, u32)> {
+    let path_owned = path.to_string();
+    let result = py.detach(|| jpeg_info::image_info(std::path::Path::new(&path_owned)));
+    let info = result.map_err(to_pyerr)?;
+    Ok((info.width, info.height))
+}
+
 /// Read image dimensions for a batch of files (header-only, no decode).
 ///
 /// Args:

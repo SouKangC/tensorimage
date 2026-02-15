@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use tensorimage_core::crop::CropMode;
 use tensorimage_core::error::TensorImageError;
 use tensorimage_core::normalize::{NormalizeParams, normalize_hwc_to_chw_from_slice};
-use tensorimage_core::pipeline::{PipelineConfig, PipelineOutput, execute_pipeline};
+use tensorimage_core::pipeline::{PipelineConfig, PipelineOutput, execute_pipeline, execute_pipeline_bytes};
 use tensorimage_core::resize::{Algorithm, resize_exact_borrowed};
 
 fn parse_crop(crop: &str, size: Option<u32>) -> Result<(CropMode, u32, u32), PyErr> {
@@ -212,6 +212,103 @@ fn build_output_list<'py>(
         }
     }
     Ok(list.into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, size=None, algorithm=None, crop=None, normalize=None))]
+pub fn load_bytes<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    size: Option<u32>,
+    algorithm: Option<&str>,
+    crop: Option<&str>,
+    normalize: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let config = build_config(size, algorithm, crop, normalize)?;
+    // Copy bytes before GIL release — required for safe py.detach()
+    let data_owned = data.to_vec();
+
+    let result = py.detach(|| execute_pipeline_bytes(&data_owned, &config));
+    let output = result.map_err(to_pyerr)?;
+
+    match output {
+        PipelineOutput::U8Hwc(image) => {
+            let h = image.height as usize;
+            let w = image.width as usize;
+            let c = image.channels as usize;
+            let flat = PyArray1::from_vec(py, image.data);
+            let reshaped = flat
+                .reshape_with_order([h, w, c], numpy::npyffi::NPY_ORDER::NPY_CORDER)?;
+            Ok(reshaped.into_any().unbind())
+        }
+        PipelineOutput::F32Chw { data, height, width } => {
+            let h = height as usize;
+            let w = width as usize;
+            let flat = PyArray1::from_vec(py, data);
+            let reshaped = flat
+                .reshape_with_order([3, h, w], numpy::npyffi::NPY_ORDER::NPY_CORDER)?;
+            Ok(reshaped.into_any().unbind())
+        }
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (data_list, size=None, algorithm=None, crop=None, normalize=None, workers=None))]
+pub fn load_batch_bytes<'py>(
+    py: Python<'py>,
+    data_list: Vec<Vec<u8>>,
+    size: Option<u32>,
+    algorithm: Option<&str>,
+    crop: Option<&str>,
+    normalize: Option<&str>,
+    workers: Option<usize>,
+) -> PyResult<Py<PyAny>> {
+    let config = build_config(size, algorithm, crop, normalize)?;
+    let num_workers = workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    });
+
+    // Fast path: when crop + normalize are both set, use contiguous buffer
+    if let (Some((_, cw, ch)), Some(_)) = (&config.crop, &config.normalize) {
+        let (crop_h, crop_w) = (*ch, *cw);
+        let n = data_list.len();
+        let h = crop_h as usize;
+        let w = crop_w as usize;
+
+        let batch_data = py.detach(|| {
+            tensorimage_core::batch::load_batch_bytes_contiguous(
+                &data_list, &config, num_workers, crop_h, crop_w,
+            )
+        });
+        let data = batch_data.map_err(to_pyerr)?;
+
+        let flat = PyArray1::from_vec(py, data);
+        let reshaped = flat.reshape_with_order(
+            [n, 3, h, w],
+            numpy::npyffi::NPY_ORDER::NPY_CORDER,
+        )?;
+        return Ok(reshaped.into_any().unbind());
+    }
+
+    let results = py.detach(|| {
+        tensorimage_core::batch::load_batch_bytes(&data_list, &config, num_workers)
+    });
+    let outputs = results.map_err(to_pyerr)?;
+
+    // Check if all outputs are F32Chw with the same dimensions → stack into [N,3,H,W]
+    if let Some(PipelineOutput::F32Chw { height, width, .. }) = outputs.first() {
+        let h = *height;
+        let w = *width;
+        let all_same = outputs.iter().all(|o| matches!(o, PipelineOutput::F32Chw { height: oh, width: ow, .. } if *oh == h && *ow == w));
+
+        if all_same {
+            return build_f32_batch(py, outputs, h, w);
+        }
+    }
+
+    build_output_list(py, outputs)
 }
 
 /// Fused ToTensor + Normalize: u8 HWC → f32 CHW in a single pass.

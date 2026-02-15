@@ -3,6 +3,7 @@ pub mod crop;
 pub mod decode;
 pub mod dedup;
 pub mod error;
+pub mod exif;
 pub mod jpeg_info;
 pub mod normalize;
 pub mod phash;
