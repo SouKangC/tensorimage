@@ -28,6 +28,29 @@ batch = ti.load_batch(paths, size=224, crop="center", normalize="imagenet")
 
 That's it. No `Image.open()`, no `.convert("RGB")`, no manual normalize+transpose. One call, one tensor.
 
+### PyTorch integration
+
+```python
+import tensorimage as ti
+
+# Load directly as a PyTorch CPU tensor (zero-copy from numpy)
+tensor = ti.load("photo.jpg", size=224, crop="center", normalize="imagenet", device="cpu")
+# tensor.shape = (3, 224, 224), dtype=torch.float32
+
+# Load to GPU (CUDA)
+tensor = ti.load("photo.jpg", size=224, crop="center", normalize="imagenet", device="cuda")
+
+# Batch loading to GPU
+batch = ti.load_batch(paths, size=224, crop="center", normalize="imagenet", device="cuda")
+
+# DLPack interop — framework-agnostic zero-copy
+arr = ti.load("photo.jpg", size=224)
+import torch
+tensor = torch.from_dlpack(ti.to_dlpack(arr))
+```
+
+`device=None` (default) returns numpy arrays for full backward compatibility.
+
 ### Drop-in torchvision.transforms replacement
 
 ```python
@@ -224,7 +247,8 @@ tensorimage/
 │   └── transforms.py           # Drop-in torchvision.transforms replacement (Phase 3)
 ├── tests/
 │   ├── test_decode.py          # 45 tests: decode, resize, crop, normalize, pipeline, batch
-│   └── test_transforms.py      # 67 tests: transforms + fused optimizations (Phase 3)
+│   ├── test_transforms.py      # 67 tests: transforms + fused optimizations (Phase 3)
+│   └── test_tensor_output.py   # 23 tests: device parameter, DLPack, zero-copy (Phase 5)
 └── benches/
     ├── compare.py              # Benchmark vs PIL (resize, pipeline, batch)
     └── compare_transforms.py   # Benchmark transforms vs torchvision.transforms
@@ -292,15 +316,23 @@ Fat LTO, fused resize+crop, zero-copy bindings, persistent thread pool.
 - [x] `resize_exact_borrowed` using `Image::from_slice_u8` for borrowed resize path
 - [x] Pipeline 6.6x vs PIL (was 5.2x), batch 47x vs PIL (was 20x), end-to-end 5.2x vs torchvision (was 4.4x)
 
-### Phase 5: PyTorch tensor output + GPU path
+### Phase 5: PyTorch tensor output + DLPack interop ✅
 
-`ti.load("img.jpg", device="cuda")` — decode to GPU tensor directly.
+`ti.load("img.jpg", device="cpu")` — zero-copy torch.Tensor output.
 
-- DLPack export for zero-copy to PyTorch tensors
-- Optional NVJPEG decode (CUDA GPU JPEG decode)
+- [x] `device` parameter on `load()` and `load_batch()` — `"cpu"` (zero-copy), `"cuda"` (H2D transfer)
+- [x] Zero-copy `torch.from_numpy()` — removed wasteful `.copy()` calls in transforms
+- [x] `to_dlpack()` utility for framework-agnostic interop (JAX, TensorFlow, etc.)
+- [x] Full backward compatibility — `device=None` returns numpy arrays
+- [x] 23 new tests for device parameter, DLPack, and zero-copy verification
+
+### Phase 6: GPU decode (NVJPEG)
+
+- NVJPEG decode (CUDA GPU JPEG decode)
 - GPU resize via CUDA kernels
+- End-to-end GPU pipeline: file → CUDA tensor with no CPU copies
 
-### Phase 6: Smart dataset filtering
+### Phase 7: Smart dataset filtering
 
 - Perceptual hash deduplication in Rust
 - CLIP-based aesthetic scoring

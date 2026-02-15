@@ -181,7 +181,7 @@ class Compose:
         )
         if _has_torch():
             import torch
-            result = torch.from_numpy(result.copy())
+            result = torch.from_numpy(result)
         return result, True
 
     def __call__(self, img):
@@ -202,7 +202,7 @@ class Compose:
                     result = _to_tensor_normalize(arr, self._fused_mean, self._fused_std)
                     if _has_torch():
                         import torch
-                        img = torch.from_numpy(result.copy())
+                        img = torch.from_numpy(result)
                     else:
                         img = result
                 elif i == self._fused_idx + 1:
@@ -442,10 +442,10 @@ class ToTensor:
         img = _ensure_numpy_u8_hwc(img)
         # HWC uint8 → CHW float32 [0, 1]
         arr = img.astype(np.float32) / 255.0
-        arr = arr.transpose(2, 0, 1)  # HWC → CHW
+        arr = np.ascontiguousarray(arr.transpose(2, 0, 1))  # HWC → CHW
         if _has_torch():
             import torch
-            return torch.from_numpy(arr.copy())
+            return torch.from_numpy(arr)
         return arr
 
     def __repr__(self):

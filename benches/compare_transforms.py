@@ -128,6 +128,29 @@ def bench_torchvision_from_file(path, iterations):
     return times, out
 
 
+def bench_tensorimage_device_cpu(path, iterations):
+    """device='cpu': Rust load → zero-copy torch.Tensor via device parameter."""
+    import tensorimage as ti
+
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return None, None
+
+    # Warmup
+    for _ in range(3):
+        ti.load(path, size=224, crop="center", normalize="imagenet", device="cpu")
+
+    times = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        out = ti.load(path, size=224, crop="center", normalize="imagenet", device="cpu")
+        elapsed = time.perf_counter() - start
+        times.append(elapsed)
+
+    return times, out
+
+
 def main():
     print(f"Loading {FIXTURE}...")
     pil_img = Image.open(FIXTURE).convert("RGB")
@@ -170,6 +193,17 @@ def main():
         print(f"End-to-end file -> tensor:")
         print(f"  PIL + torchvision:       {tv_e2e:.2f} ms")
         print(f"  tensorimage fast-path:   {fast_median:.2f} ms  [{speedup_e2e:.1f}x]")
+
+    # --- tensorimage device="cpu" (Rust load → torch.Tensor) ---
+    dev_times, dev_out = bench_tensorimage_device_cpu(FIXTURE, ITERATIONS)
+    if dev_times is not None:
+        dev_median = statistics.median(dev_times) * 1000
+        dev_label = f"tensorimage device=cpu:    {dev_median:.2f} ms (median)"
+        if tv_median:
+            dev_label += f"  [{tv_median / dev_median:.1f}x]"
+        print(dev_label)
+    else:
+        print("torch not installed -- skipping device=cpu benchmark")
 
     # --- Verify outputs ---
     print()
