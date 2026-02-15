@@ -76,6 +76,12 @@ Each step allocates memory and copies data. tensorimage replaces all of it with 
 | Full pipeline (resize + crop + normalize) | **8.3 ms** | 42.6 ms | **5.2x** |
 | Batch (8 images, 4 workers) | **17.3 ms** | 345.1 ms | **20x** |
 
+Transforms pipeline (Resize(256) → CenterCrop(224) → ToTensor → Normalize), 4000x2000 JPEG, 100 iterations, Apple M4:
+
+| Pipeline | tensorimage.transforms | torchvision.transforms | Speedup |
+|---|---|---|---|
+| ImageNet inference | **3.5 ms** | 10.5 ms | **3.0x** |
+
 ## API
 
 ### `ti.load(path, size=None, algorithm=None, crop=None, normalize=None)`
