@@ -1,7 +1,11 @@
 pub mod batch;
 pub mod crop;
 pub mod decode;
+pub mod dedup;
 pub mod error;
+pub mod jpeg_info;
 pub mod normalize;
+pub mod phash;
 pub mod pipeline;
+pub mod pool;
 pub mod resize;

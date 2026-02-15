@@ -1,21 +1,10 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
 use crate::error::Result;
 use crate::pipeline::{PipelineConfig, PipelineOutput, execute_pipeline, execute_pipeline_into};
-
-static GLOBAL_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-
-fn get_or_create_pool(num_workers: usize) -> &'static rayon::ThreadPool {
-    GLOBAL_POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_workers)
-            .build()
-            .expect("Failed to create thread pool")
-    })
-}
+use crate::pool::get_or_create_pool;
 
 /// Load and process a batch of images in parallel using a persistent rayon thread pool.
 /// Short-circuits on the first error encountered.

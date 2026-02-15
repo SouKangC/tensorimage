@@ -22,6 +22,9 @@ pub enum TensorImageError {
 
     #[error("Normalize error: {0}")]
     Normalize(String),
+
+    #[error("Hash error: {0}")]
+    Hash(String),
 }
 
 pub type Result<T> = std::result::Result<T, TensorImageError>;

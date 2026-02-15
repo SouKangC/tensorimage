@@ -69,6 +69,39 @@ tensor = transform(img)  # (3, 224, 224) float32
 
 Supports: `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`, `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`. Resize uses the Rust SIMD backend. torch is optional — `ToTensor` returns `torch.Tensor` if available, numpy otherwise. `Compose` auto-detects common patterns and fuses operations in Rust for extra speed.
 
+### Dataset filtering
+
+```python
+import tensorimage as ti
+
+# Perceptual hashing — fast, computed in Rust
+h = ti.phash("photo.jpg")                              # 64-bit dHash
+h = ti.phash("photo.jpg", algorithm="phash")           # 64-bit pHash (more robust)
+hashes = ti.phash_batch(paths, algorithm="dhash")       # parallel batch hashing
+dist = ti.hamming_distance(h1, h2)                     # Hamming distance between hashes
+
+# Deduplication — find and group near-duplicate images
+result = ti.deduplicate(paths, algorithm="dhash", threshold=5)
+# result = {"keep_indices": [0, 3, 7], "duplicate_groups": [[0, 1, 2], ...], "hashes": [...]}
+unique_paths = [paths[i] for i in result["keep_indices"]]
+
+# Full pipeline — dimension filter + dedup + optional aesthetic scoring
+result = ti.filter_dataset(
+    paths,
+    min_width=512,              # remove undersized images
+    min_height=512,
+    deduplicate=True,           # remove near-duplicates (default)
+    hash_algorithm="dhash",     # "dhash" (fast) or "phash" (robust)
+    hash_threshold=5,           # Hamming distance threshold
+    min_aesthetic=5.0,          # CLIP aesthetic score (requires torch + open_clip)
+    verbose=True,               # print progress
+)
+clean_paths = result["paths"]
+print(result["stats"])  # {"total": 1000, "dimension_removed": 50, "duplicate_removed": 120, ...}
+```
+
+Filters are applied cheapest-first: dimension check (header-only, no decode) → perceptual hash dedup (Rust parallel) → aesthetic scoring (CLIP, only if `min_aesthetic` is set). No torch dependency for hash-only workflows.
+
 ## Why tensorimage?
 
 Loading and resizing images in Python is slow. A typical PIL pipeline does this:
@@ -151,6 +184,56 @@ Load multiple images in parallel using a rayon thread pool.
 - With `normalize` + `crop` (all images same size): contiguous `float32` array with shape `(N, 3, H, W)`
 - Otherwise: Python list of individual arrays
 
+### `ti.phash(path_or_array, algorithm="dhash")`
+
+Compute a 64-bit perceptual hash of an image.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `path_or_array` | `str` or `ndarray` | Image file path or numpy uint8 array (H, W, 3) |
+| `algorithm` | `str` | `"dhash"` (default, fast) or `"phash"` (robust, uses DCT) |
+
+**Returns:** `int` — 64-bit perceptual hash.
+
+### `ti.phash_batch(paths, algorithm="dhash", workers=None)`
+
+Compute perceptual hashes for multiple images in parallel.
+
+### `ti.hamming_distance(a, b)`
+
+Compute Hamming distance (number of differing bits) between two 64-bit hashes.
+
+### `ti.deduplicate(paths, algorithm="dhash", threshold=None, workers=None)`
+
+Find and group near-duplicate images by perceptual hash.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `paths` | `list[str]` | List of image file paths |
+| `algorithm` | `str` | `"dhash"` or `"phash"` |
+| `threshold` | `int` or `None` | Max Hamming distance. Default: 0 (dhash) / 10 (phash) |
+| `workers` | `int` or `None` | Number of worker threads |
+
+**Returns:** `dict` with `"keep_indices"`, `"duplicate_groups"`, `"hashes"`.
+
+### `ti.filter_dataset(paths, ...)`
+
+High-level dataset filtering: dimension check → dedup → aesthetic scoring.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `paths` | `list[str]` | Image file paths |
+| `min_width` | `int` or `None` | Minimum width filter |
+| `min_height` | `int` or `None` | Minimum height filter |
+| `deduplicate` | `bool` | Remove near-duplicates (default: `True`) |
+| `hash_algorithm` | `str` | `"dhash"` or `"phash"` |
+| `hash_threshold` | `int` or `None` | Hamming distance threshold |
+| `min_aesthetic` | `float` or `None` | Min CLIP aesthetic score (requires torch + open_clip) |
+| `workers` | `int` or `None` | Worker threads |
+| `verbose` | `bool` | Print progress |
+
+**Returns:** `dict` with `"paths"`, `"indices"`, `"stats"`.
+
 ### Examples
 
 ```python
@@ -229,7 +312,7 @@ The GIL is released during all Rust work. Batch loading runs images in parallel 
 ```
 tensorimage/
 ├── crates/
-│   ├── tensorimage-core/       # Pure Rust — decode, resize, crop, normalize, pipeline, batch
+│   ├── tensorimage-core/       # Pure Rust — decode, resize, crop, normalize, pipeline, batch, hash, dedup
 │   │   └── src/
 │   │       ├── decode.rs       # JPEG (turbojpeg) + PNG (image crate) decoding
 │   │       ├── resize.rs       # SIMD resize via fast_image_resize
@@ -237,18 +320,25 @@ tensorimage/
 │   │       ├── normalize.rs    # Fused normalize + HWC→CHW transpose
 │   │       ├── pipeline.rs     # Chained decode→resize→crop→normalize
 │   │       ├── batch.rs        # Parallel batch loading via rayon
+│   │       ├── pool.rs         # Shared rayon thread pool (Phase 7)
+│   │       ├── phash.rs        # Perceptual hashing: dHash, pHash (Phase 7)
+│   │       ├── dedup.rs        # Parallel deduplication by hash (Phase 7)
+│   │       ├── jpeg_info.rs    # Fast header-only dimension read (Phase 7)
 │   │       └── error.rs        # Error types
 │   └── tensorimage-python/     # PyO3 bindings
 │       └── src/
 │           ├── lib.rs          # Python module definition
-│           └── load.rs         # load(), load_batch(), _resize_array, _to_tensor_normalize, _load_pipeline
+│           ├── load.rs         # load(), load_batch(), _resize_array, _to_tensor_normalize, _load_pipeline
+│           └── hash.rs         # phash, deduplicate, image_info bindings (Phase 7)
 ├── python/tensorimage/         # Python package
-│   ├── __init__.py             # Re-exports load(), load_batch() from Rust
-│   └── transforms.py           # Drop-in torchvision.transforms replacement (Phase 3)
+│   ├── __init__.py             # Re-exports from Rust + phash/deduplicate/filter_dataset
+│   ├── transforms.py           # Drop-in torchvision.transforms replacement (Phase 3)
+│   └── aesthetic.py            # CLIP aesthetic scoring (Phase 7, optional torch+open_clip)
 ├── tests/
 │   ├── test_decode.py          # 45 tests: decode, resize, crop, normalize, pipeline, batch
 │   ├── test_transforms.py      # 67 tests: transforms + fused optimizations (Phase 3)
-│   └── test_tensor_output.py   # 23 tests: device parameter, DLPack, zero-copy (Phase 5)
+│   ├── test_tensor_output.py   # 23 tests: device parameter, DLPack, zero-copy (Phase 5)
+│   └── test_filter.py          # 31 tests: phash, dedup, filter_dataset (Phase 7)
 └── benches/
     ├── compare.py              # Benchmark vs PIL (resize, pipeline, batch)
     └── compare_transforms.py   # Benchmark transforms vs torchvision.transforms
@@ -332,11 +422,20 @@ Fat LTO, fused resize+crop, zero-copy bindings, persistent thread pool.
 - GPU resize via CUDA kernels
 - End-to-end GPU pipeline: file → CUDA tensor with no CPU copies
 
-### Phase 7: Smart dataset filtering
+### Phase 7: Smart dataset filtering ✅
 
-- Perceptual hash deduplication in Rust
-- CLIP-based aesthetic scoring
-- `ti.agent.filter(min_aesthetic=5.0, deduplicate=True)` for dataset curation
+`ti.filter_dataset(paths, deduplicate=True, min_aesthetic=5.0)` — curate ML datasets in one call.
+
+- [x] Perceptual hashing in Rust: dHash (fast) and pHash (DCT-based, robust)
+- [x] Parallel batch hashing via shared rayon thread pool
+- [x] Greedy deduplication by Hamming distance threshold
+- [x] Fast header-only dimension read (JPEG: turbojpeg, PNG: IHDR chunk)
+- [x] `ti.phash()`, `ti.phash_batch()`, `ti.hamming_distance()` — low-level hash API
+- [x] `ti.deduplicate()` — find and group near-duplicate images
+- [x] `ti.filter_dataset()` — high-level pipeline: dimension filter → dedup → aesthetic scoring
+- [x] CLIP aesthetic scoring via `AestheticScorer` class (optional torch + open_clip)
+- [x] No new Rust dependencies — hand-rolled DCT, area-average resize, BT.601 grayscale
+- [x] 31 tests (28 pass without torch, 3 skipped for aesthetic scoring)
 
 ## License
 
