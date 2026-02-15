@@ -2,7 +2,7 @@
 
 Fast image loading for Python. Built in Rust.
 
-A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and normalizes images **5x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy. Includes fused pipeline and parallel batch loading via rayon.
+A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and normalizes images **6x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy. Includes fused pipeline and parallel batch loading via rayon.
 
 ## Quickstart
 
@@ -72,18 +72,18 @@ Each step allocates memory and copies data. tensorimage replaces all of it with 
 
 | Task | tensorimage | PIL + numpy | Speedup |
 |---|---|---|---|
-| Resize only | **7.9 ms** | 41.0 ms | **5.2x** |
-| Full pipeline (resize + crop + normalize) | **8.3 ms** | 42.6 ms | **5.2x** |
-| Batch (8 images, 4 workers) | **17.3 ms** | 345.1 ms | **20x** |
+| Resize only | **7.7 ms** | 41.6 ms | **5.4x** |
+| Full pipeline (resize + crop + normalize) | **6.5 ms** | 43.0 ms | **6.6x** |
+| Batch (8 images, 4 workers) | **7.3 ms** | 343.8 ms | **47x** |
 
 Transforms pipeline (Resize(256) → CenterCrop(224) → ToTensor → Normalize), 4000x2000 JPEG, 100 iterations, Apple M4:
 
 | Pipeline | tensorimage.transforms | torchvision.transforms | Speedup |
 |---|---|---|---|
 | From numpy (fused ToTensor+Normalize) | **3.2 ms** | 10.4 ms | **3.2x** |
-| End-to-end file → tensor (fast-path) | **4.1 ms** | 18.1 ms | **4.4x** |
+| End-to-end file → tensor (fast-path) | **3.5 ms** | 18.2 ms | **5.2x** |
 
-The fast-path detects `Resize → CenterCrop → ToTensor → Normalize` and routes the entire pipeline through Rust, including JPEG decode with IDCT scaling. This is especially powerful for dataloaders where the input is a file path.
+Phase 4 optimizations: fat LTO + `target-cpu=native` enables cross-crate SIMD inlining; fused resize+crop eliminates an intermediate buffer by computing source-space crop coordinates in a single resampling pass; persistent rayon thread pool + contiguous batch output (`[N,3,H,W]` pre-allocated, each worker writes to its slice) cut batch overhead dramatically.
 
 ## API
 
@@ -186,13 +186,9 @@ Raw bytes in memory
   v
 RGB pixels at reduced resolution
   |
-  |  fast_image_resize SIMD Lanczos (NEON / AVX2)
+  |  fused resize+crop: SIMD Lanczos with source-space crop (single resampling pass)
   v
-RGB pixels at exact target size
-  |
-  |  center_crop (single allocation, row-by-row copy)
-  v
-RGB pixels at crop size
+RGB pixels at crop size (e.g., 224×224)
   |
   |  fused normalize + HWC→CHW transpose (single pass, pre-computed scale/bias)
   v
@@ -282,7 +278,21 @@ from tensorimage import transforms  # same API, faster
 - [x] Full fast-path: `Resize → CenterCrop → ToTensor → Normalize` from file routes through Rust pipeline with IDCT scaling (4.4x end-to-end)
 - [x] 67 tests including fused optimization validation and conditional torchvision comparison
 
-### Phase 4: PyTorch tensor output + GPU path
+### Phase 4: Performance optimizations ✅
+
+Fat LTO, fused resize+crop, zero-copy bindings, persistent thread pool.
+
+- [x] Release profile: `lto = "fat"`, `codegen-units = 1` for cross-crate SIMD inlining
+- [x] `target-cpu=native` for full NEON (Apple Silicon) / AVX2 (x86) instruction selection
+- [x] Fused resize+crop: single resampling pass via source-space crop coordinates (eliminates intermediate buffer)
+- [x] Identity resize skip when IDCT scaling already hits target dimensions
+- [x] Persistent rayon thread pool via `OnceLock` (eliminates per-batch thread spawn)
+- [x] Contiguous batch output: pre-allocate `[N,3,H,W]` buffer, each worker writes directly to its slice
+- [x] Slice-based normalize in PyO3 bindings (avoids `.to_vec()` copy from numpy)
+- [x] `resize_exact_borrowed` using `Image::from_slice_u8` for borrowed resize path
+- [x] Pipeline 6.6x vs PIL (was 5.2x), batch 47x vs PIL (was 20x), end-to-end 5.2x vs torchvision (was 4.4x)
+
+### Phase 5: PyTorch tensor output + GPU path
 
 `ti.load("img.jpg", device="cuda")` — decode to GPU tensor directly.
 
@@ -290,7 +300,7 @@ from tensorimage import transforms  # same API, faster
 - Optional NVJPEG decode (CUDA GPU JPEG decode)
 - GPU resize via CUDA kernels
 
-### Phase 5: Smart dataset filtering
+### Phase 6: Smart dataset filtering
 
 - Perceptual hash deduplication in Rust
 - CLIP-based aesthetic scoring
