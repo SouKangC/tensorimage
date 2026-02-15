@@ -1,14 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use numpy::ndarray::Ix3;
-use numpy::{PyArray1, PyArrayMethods};
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray3, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 
 use tensorimage_core::crop::CropMode;
+use tensorimage_core::decode::DecodedImage;
 use tensorimage_core::error::TensorImageError;
 use tensorimage_core::normalize::NormalizeParams;
 use tensorimage_core::pipeline::{PipelineConfig, PipelineOutput, execute_pipeline};
-use tensorimage_core::resize::Algorithm;
+use tensorimage_core::resize::{Algorithm, resize_exact};
 
 fn parse_crop(crop: &str, size: Option<u32>) -> Result<(CropMode, u32, u32), PyErr> {
     let mode = CropMode::from_str(crop)
@@ -189,4 +190,45 @@ fn build_output_list<'py>(
         }
     }
     Ok(list.into_any().unbind())
+}
+
+/// Resize a numpy u8 HWC array using SIMD-accelerated resize.
+/// Used by the transforms module for Resize transform.
+#[pyfunction]
+#[pyo3(signature = (array, target_h, target_w, algorithm))]
+pub fn _resize_array<'py>(
+    py: Python<'py>,
+    array: PyReadonlyArray3<'py, u8>,
+    target_h: u32,
+    target_w: u32,
+    algorithm: &str,
+) -> PyResult<Py<PyAny>> {
+    let shape = array.shape();
+    let h = shape[0] as u32;
+    let w = shape[1] as u32;
+
+    let algo = Algorithm::from_str(algorithm)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    // Copy contiguous data from numpy array
+    let data = array.as_slice()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("Array must be contiguous"))?
+        .to_vec();
+
+    let image = DecodedImage {
+        data,
+        width: w,
+        height: h,
+        channels: 3,
+    };
+
+    let result = py.detach(|| resize_exact(image, target_w, target_h, algo));
+    let resized = result.map_err(to_pyerr)?;
+
+    let rh = resized.height as usize;
+    let rw = resized.width as usize;
+    let flat = PyArray1::from_vec(py, resized.data);
+    let reshaped = flat
+        .reshape_with_order([rh, rw, 3], numpy::npyffi::NPY_ORDER::NPY_CORDER)?;
+    Ok(reshaped.into_any().unbind())
 }

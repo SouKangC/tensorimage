@@ -28,6 +28,24 @@ batch = ti.load_batch(paths, size=224, crop="center", normalize="imagenet")
 
 That's it. No `Image.open()`, no `.convert("RGB")`, no manual normalize+transpose. One call, one tensor.
 
+### Drop-in torchvision.transforms replacement
+
+```python
+# from torchvision import transforms
+from tensorimage import transforms  # same API, faster
+
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+img = Image.open("photo.jpg")
+tensor = transform(img)  # (3, 224, 224) float32
+```
+
+Supports: `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`, `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`. Resize uses the Rust SIMD backend. torch is optional — `ToTensor` returns `torch.Tensor` if available, numpy otherwise.
+
 ## Why tensorimage?
 
 Loading and resizing images in Python is slow. A typical PIL pipeline does this:
@@ -197,11 +215,14 @@ tensorimage/
 │           ├── lib.rs          # Python module definition
 │           └── load.rs         # load() + load_batch() with GIL release + zero-copy
 ├── python/tensorimage/         # Python package
-│   └── __init__.py             # Re-exports load(), load_batch() from Rust
+│   ├── __init__.py             # Re-exports load(), load_batch() from Rust
+│   └── transforms.py           # Drop-in torchvision.transforms replacement (Phase 3)
 ├── tests/
-│   └── test_decode.py          # 45 tests: decode, resize, crop, normalize, pipeline, batch
+│   ├── test_decode.py          # 45 tests: decode, resize, crop, normalize, pipeline, batch
+│   └── test_transforms.py      # 55+ tests: transforms module (Phase 3)
 └── benches/
-    └── compare.py              # Benchmark vs PIL (resize, pipeline, batch)
+    ├── compare.py              # Benchmark vs PIL (resize, pipeline, batch)
+    └── compare_transforms.py   # Benchmark transforms vs torchvision.transforms
 ```
 
 ## Roadmap
@@ -219,7 +240,7 @@ tensorimage/
 - [x] GIL released during all Rust work
 - [x] 20 correctness tests including pixel-level comparison vs PIL
 
-### Phase 2: Fused pipeline + batch loading ✅ (current)
+### Phase 2: Fused pipeline + batch loading ✅
 
 `ti.load("img.jpg", size=224, crop="center", normalize="imagenet")` returns a `float32 [3, 224, 224]` tensor ready for PyTorch.
 
@@ -233,18 +254,22 @@ tensorimage/
 - [x] Full backward compatibility with Phase 1 API
 - [x] 45 tests total (20 Phase 1 + 25 Phase 2)
 
-### Phase 3: torchvision.transforms compatibility
+### Phase 3: torchvision.transforms compatibility ✅
 
 Drop-in replacement — change one import line.
 
 ```python
 # from torchvision import transforms
-from tensorimage import transforms  # same API, 10x faster
+from tensorimage import transforms  # same API, faster
 ```
 
-- `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`
-- `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`
-- Pixel-exact output matching vs torchvision
+- [x] `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`
+- [x] `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`
+- [x] Resize uses Rust SIMD backend via `_resize_array` binding
+- [x] torch optional — `ToTensor` returns numpy if torch unavailable
+- [x] Pixel-exact match for crop/flip/normalize; ≤3 pixel values for resize
+- [x] Full pipeline matches torchvision within atol=0.02
+- [x] 55+ tests including conditional torchvision comparison
 
 ### Phase 4: PyTorch tensor output + GPU path
 
