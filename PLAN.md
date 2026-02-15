@@ -72,9 +72,13 @@ Fat LTO, fused resize+crop, zero-copy bindings, persistent thread pool.
 
 ## Phase 6: GPU decode (NVJPEG)
 
-- NVJPEG decode (CUDA GPU JPEG decode)
-- GPU resize via CUDA kernels
-- End-to-end GPU pipeline: file → CUDA tensor with no CPU copies
+End-to-end GPU pipeline: file → CUDA tensor with no CPU→GPU copies. `pip install tensorimage[cuda]`.
+
+- [ ] NVJPEG decode via `nvjpeg` C API (CUDA GPU JPEG decode)
+- [ ] GPU resize via CUDA kernels (or cuDNN)
+- [ ] End-to-end GPU pipeline: file → CUDA tensor with no CPU→GPU copies
+- [ ] Optional feature flag: `pip install tensorimage[cuda]`
+- [ ] Fallback to CPU path when CUDA unavailable
 
 ## Phase 7: Smart dataset filtering ✅
 
@@ -90,3 +94,67 @@ Fat LTO, fused resize+crop, zero-copy bindings, persistent thread pool.
 - [x] CLIP aesthetic scoring via `AestheticScorer` class (optional torch + open_clip)
 - [x] No new Rust dependencies — hand-rolled DCT, area-average resize, BT.601 grayscale
 - [x] 31 tests (28 pass without torch, 3 skipped for aesthetic scoring)
+
+## Phase 8: Extended format support + real-world robustness
+
+`ti.load_bytes(data, size=224)` — load from bytes (S3, HTTP). WebP/AVIF decode. EXIF auto-rotation.
+
+- [ ] Enable WebP and AVIF features in `image` crate (adds decode support via existing fallback path)
+- [ ] Optimized WebP decode via `libwebp` (direct C bindings, skip `image` crate overhead)
+- [ ] EXIF orientation auto-correction: read tag from JPEG, rotate/flip before returning
+- [ ] `ti.load_bytes(data, ...)` Python API — same parameters as `ti.load()` but accepts `bytes`
+- [ ] `ti.load_batch_bytes(data_list, ...)` for parallel bytes decoding
+- [ ] `ti.image_info(path)` single-file Python API (complement to existing batch version)
+- [ ] New Rust dependency: `kamadak-exif` (lightweight EXIF parser)
+
+## Phase 9: Rust-accelerated augmentations
+
+Rust-backed GaussianBlur, affine transforms, and more — the missing 60% of preprocessing time.
+
+- [ ] **GaussianBlur** — separable 2D convolution in Rust (SIMD-friendly O(n*k) per axis)
+- [ ] **RandomRotation** — bilinear-interpolated affine warp in Rust
+- [ ] **RandomAffine** — rotation + translation + scale + shear, single resampling pass
+- [ ] **RandomPerspective** — 3x3 homography warp in Rust
+- [ ] **RandomErasing** / Cutout — zero-fill or noise-fill random rectangle (Python/numpy)
+- [ ] **Grayscale** / **RandomGrayscale** — weighted channel average (Python/numpy)
+- [ ] **GaussianNoise** — additive Gaussian noise (Python/numpy)
+- [ ] **Pad** — constant/reflect/replicate padding (Python/numpy)
+- [ ] **ElasticTransform** — grid-based displacement (Python/numpy)
+- [ ] New module: `crates/tensorimage-core/src/augment.rs`
+- [ ] New module: `crates/tensorimage-python/src/augment.rs` (PyO3 bindings)
+- [ ] All exposed via `tensorimage.transforms`, same API patterns as torchvision
+
+## Phase 10: PyTorch Dataset & DataLoader integration
+
+`ti.ImageFolder(root, transform)` — drop-in `torchvision.datasets.ImageFolder` replacement.
+
+- [ ] `ti.ImageFolder(root, transform=None)` — walks directory, class labels from subdirectory names
+- [ ] `ti.ImageDataset(paths, labels=None, transform=None)` — generic dataset from path list
+- [ ] `ti.collate_fn` — optimized collation using `ti.load_batch()` under the hood
+- [ ] Integration with `torch.utils.data.DataLoader` (`num_workers`, `prefetch_factor`)
+- [ ] Pure Python — no Rust changes, uses existing `ti.load()` and `ti.load_batch()`
+
+## Phase 11: Streaming I/O & large-scale datasets
+
+`ti.TarDataset(shards)` — sequential I/O for ImageNet/LAION-scale training. HTTP/URL loading.
+
+- [ ] TAR shard reader in Rust — sequential `.tar` read, parallel image decode within
+- [ ] `ti.load_tar(path, transform=None)` → iterator of (filename, array) pairs
+- [ ] `ti.TarDataset(shard_paths, transform=None)` → PyTorch `IterableDataset`
+- [ ] WebDataset compatibility — read `.tar` shards following WebDataset naming convention
+- [ ] `ti.load_url(url)` — HTTP fetch + decode via `ureq` (lightweight Rust HTTP client)
+- [ ] `ti.load_urls(url_list, workers=None)` — parallel fetch + decode
+- [ ] Memory-mapped files via `mmap` for large local files
+- [ ] New Rust dependencies: `ureq` (HTTP), `tar` (archive reading)
+
+## Phase 12: Video frame extraction
+
+`ti.load_video_frames(path, fps=1)` — fast frame extraction via FFmpeg. Fills the TorchVision deprecation gap.
+
+- [ ] Video decode via `ffmpeg-next` Rust crate (FFmpeg C API bindings)
+- [ ] `ti.load_video_frames(path, indices=None, fps=None, transform=None)` — extract specific frames or uniform sampling
+- [ ] `ti.video_info(path)` — metadata: duration, fps, resolution, frame count
+- [ ] Keyframe-only extraction mode (fast seeking, no full decode)
+- [ ] Batch frame loading with parallel decode
+- [ ] Returns numpy arrays or torch tensors (same `device` parameter pattern)
+- [ ] New Rust dependency: `ffmpeg-next`

@@ -297,6 +297,15 @@ tensorimage/
 
 ## Roadmap
 
+Phases 1-5 and 7 are complete. Upcoming:
+
+- **Phase 8**: Extended formats (WebP, AVIF), EXIF auto-rotation, `load_bytes()` API for S3/HTTP workflows
+- **Phase 9**: Rust-accelerated augmentations (GaussianBlur, RandomRotation, RandomAffine, and more)
+- **Phase 10**: PyTorch Dataset & DataLoader integration (`ImageFolder`, `ImageDataset`, optimized collation)
+- **Phase 6**: GPU decode via NVJPEG — end-to-end CUDA pipeline
+- **Phase 11**: Streaming I/O (TAR shards, WebDataset, HTTP/URL loading) for large-scale training
+- **Phase 12**: Video frame extraction via FFmpeg
+
 See [PLAN.md](PLAN.md) for the detailed development roadmap and phase history.
 
 ## License
