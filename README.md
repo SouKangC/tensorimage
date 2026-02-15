@@ -141,6 +141,18 @@ Transforms pipeline (Resize(256) → CenterCrop(224) → ToTensor → Normalize)
 
 Phase 4 optimizations: fat LTO + `target-cpu=native` enables cross-crate SIMD inlining; fused resize+crop eliminates an intermediate buffer by computing source-space crop coordinates in a single resampling pass; persistent rayon thread pool + contiguous batch output (`[N,3,H,W]` pre-allocated, each worker writes to its slice) cut batch overhead dramatically.
 
+Perceptual hashing (vs `imagehash` Python library), 100 iterations, Apple M4:
+
+| Task | tensorimage | imagehash | Speedup |
+|---|---|---|---|
+| dHash (1920x1080 JPEG) | **0.97 ms** | 3.05 ms | **3.1x** |
+| pHash (1920x1080 JPEG) | **1.11 ms** | 30.00 ms | **27x** |
+| dHash (4000x2000 JPEG) | **2.83 ms** | 10.24 ms | **3.6x** |
+| pHash (4000x2000 JPEG) | **3.05 ms** | 10.87 ms | **3.6x** |
+| dHash batch (8 images, parallel) | **4.06 ms** | 53.49 ms | **13.2x** |
+
+Phase 7 hashing is fast because tensorimage uses IDCT-scaled JPEG decode (decodes directly at ~32px instead of full resolution) plus a hand-rolled DCT in Rust, while imagehash decodes full-res then resizes in Python with PIL. Batch adds another ~3-4x via rayon parallelism. Header-only dimension read runs at 0.015 ms/image.
+
 ## API
 
 ### `ti.load(path, size=None, algorithm=None, crop=None, normalize=None)`
