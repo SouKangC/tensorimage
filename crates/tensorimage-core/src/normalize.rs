@@ -45,8 +45,36 @@ impl NormalizeParams {
 /// Computes `(pixel / 255.0 - mean) / std` per channel while writing in CHW order.
 /// Pre-computes `scale = 1 / (255 * std)` and `bias = -mean / std` per channel.
 pub fn normalize_hwc_to_chw(image: &DecodedImage, params: &NormalizeParams) -> Vec<f32> {
-    let h = image.height as usize;
-    let w = image.width as usize;
+    normalize_hwc_to_chw_from_slice(&image.data, image.width, image.height, params)
+}
+
+/// Slice-based variant: normalizes u8 HWC pixels to f32 CHW without requiring a DecodedImage.
+pub fn normalize_hwc_to_chw_from_slice(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    params: &NormalizeParams,
+) -> Vec<f32> {
+    let h = height as usize;
+    let w = width as usize;
+    let total = h * w;
+
+    let mut output = vec![0.0f32; 3 * total];
+    normalize_hwc_to_chw_into(pixels, width, height, params, &mut output);
+    output
+}
+
+/// Write-into variant: normalizes u8 HWC pixels to f32 CHW directly into a provided buffer.
+/// `output` must have length >= 3 * width * height.
+pub fn normalize_hwc_to_chw_into(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    params: &NormalizeParams,
+    output: &mut [f32],
+) {
+    let h = height as usize;
+    let w = width as usize;
     let total = h * w;
 
     // Pre-compute fused scale and bias: output = pixel * scale + bias
@@ -57,19 +85,14 @@ pub fn normalize_hwc_to_chw(image: &DecodedImage, params: &NormalizeParams) -> V
         bias[c] = -params.mean[c] / params.std[c];
     }
 
-    let mut output = vec![0.0f32; 3 * total];
-
     // Split output into 3 channel planes using split_at_mut for aliasing guarantees
-    let (plane_r, rest) = output.split_at_mut(total);
+    let (plane_r, rest) = output[..3 * total].split_at_mut(total);
     let (plane_g, plane_b) = rest.split_at_mut(total);
 
-    let pixels = &image.data;
     for i in 0..total {
         let base = i * 3;
         plane_r[i] = pixels[base] as f32 * scale[0] + bias[0];
         plane_g[i] = pixels[base + 1] as f32 * scale[1] + bias[1];
         plane_b[i] = pixels[base + 2] as f32 * scale[2] + bias[2];
     }
-
-    output
 }

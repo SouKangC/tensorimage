@@ -5,11 +5,10 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray3, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 
 use tensorimage_core::crop::CropMode;
-use tensorimage_core::decode::DecodedImage;
 use tensorimage_core::error::TensorImageError;
-use tensorimage_core::normalize::{NormalizeParams, normalize_hwc_to_chw};
+use tensorimage_core::normalize::{NormalizeParams, normalize_hwc_to_chw_from_slice};
 use tensorimage_core::pipeline::{PipelineConfig, PipelineOutput, execute_pipeline};
-use tensorimage_core::resize::{Algorithm, resize_exact};
+use tensorimage_core::resize::{Algorithm, resize_exact_borrowed};
 
 fn parse_crop(crop: &str, size: Option<u32>) -> Result<(CropMode, u32, u32), PyErr> {
     let mode = CropMode::from_str(crop)
@@ -117,6 +116,29 @@ pub fn load_batch<'py>(
     });
     let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
 
+    // Fast path: when crop + normalize are both set, we know the output dimensions
+    // upfront and can write directly into a single contiguous buffer.
+    if let (Some((_, cw, ch)), Some(_)) = (&config.crop, &config.normalize) {
+        let (crop_h, crop_w) = (*ch, *cw);
+        let n = paths.len();
+        let h = crop_h as usize;
+        let w = crop_w as usize;
+
+        let batch_data = py.detach(|| {
+            tensorimage_core::batch::load_batch_contiguous(
+                &path_bufs, &config, num_workers, crop_h, crop_w,
+            )
+        });
+        let data = batch_data.map_err(to_pyerr)?;
+
+        let flat = PyArray1::from_vec(py, data);
+        let reshaped = flat.reshape_with_order(
+            [n, 3, h, w],
+            numpy::npyffi::NPY_ORDER::NPY_CORDER,
+        )?;
+        return Ok(reshaped.into_any().unbind());
+    }
+
     let results = py.detach(|| {
         tensorimage_core::batch::load_batch(&path_bufs, &config, num_workers)
     });
@@ -193,7 +215,7 @@ fn build_output_list<'py>(
 }
 
 /// Fused ToTensor + Normalize: u8 HWC → f32 CHW in a single pass.
-/// Reuses `normalize_hwc_to_chw()` which pre-computes scale/bias for zero intermediate allocations.
+/// Uses slice-based normalize to avoid copying the numpy array data.
 #[pyfunction]
 #[pyo3(signature = (array, mean, std))]
 pub fn _to_tensor_normalize<'py>(
@@ -208,19 +230,12 @@ pub fn _to_tensor_normalize<'py>(
 
     let params = NormalizeParams::custom(mean, std).map_err(to_pyerr)?;
 
-    let data = array
+    let slice = array
         .as_slice()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("Array must be contiguous"))?
-        .to_vec();
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("Array must be contiguous"))?;
 
-    let image = DecodedImage {
-        data,
-        width: w,
-        height: h,
-        channels: 3,
-    };
-
-    let result = py.detach(|| normalize_hwc_to_chw(&image, &params));
+    // Use slice directly — no .to_vec() copy needed for read-only normalize
+    let result = normalize_hwc_to_chw_from_slice(slice, w, h, &params);
 
     let flat = PyArray1::from_vec(py, result);
     let reshaped =
@@ -285,19 +300,12 @@ pub fn _resize_array<'py>(
     let algo = Algorithm::from_str(algorithm)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-    // Copy contiguous data from numpy array
-    let data = array.as_slice()
+    // Copy numpy data into a mutable buffer for from_slice_u8
+    let mut data = array.as_slice()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("Array must be contiguous"))?
         .to_vec();
 
-    let image = DecodedImage {
-        data,
-        width: w,
-        height: h,
-        channels: 3,
-    };
-
-    let result = py.detach(|| resize_exact(image, target_w, target_h, algo));
+    let result = py.detach(|| resize_exact_borrowed(&mut data, w, h, target_w, target_h, algo));
     let resized = result.map_err(to_pyerr)?;
 
     let rh = resized.height as usize;
