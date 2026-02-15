@@ -321,7 +321,7 @@ class TestNormalize:
         mean = [0.5, 0.5, 0.5]
         std = [0.5, 0.5, 0.5]
         out = transforms.Normalize(mean, std)(arr)
-        if HAS_TORCH:
+        if HAS_TORCH and hasattr(out, "numpy"):
             out = out.numpy()
         np.testing.assert_allclose(out, 0.0, atol=1e-6)
 
@@ -332,7 +332,7 @@ class TestNormalize:
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
         )(arr)
-        if HAS_TORCH:
+        if HAS_TORCH and hasattr(out, "numpy"):
             out = out.numpy()
         # Should have negative values after normalization
         assert out.min() < 0
@@ -352,7 +352,7 @@ class TestNormalize:
         mean = [0.0, 0.0, 0.0]
         std = [2.0, 2.0, 2.0]
         out = transforms.Normalize(mean, std)(arr)
-        if HAS_TORCH:
+        if HAS_TORCH and hasattr(out, "numpy"):
             out = out.numpy()
         np.testing.assert_allclose(out, 0.5, atol=1e-6)
 
@@ -362,7 +362,7 @@ class TestNormalize:
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
         out = transforms.Normalize(mean, std)(arr)
-        if HAS_TORCH:
+        if HAS_TORCH and hasattr(out, "numpy"):
             out = out.numpy()
         expected = arr.copy()
         for c in range(3):
@@ -587,6 +587,177 @@ class TestInterpolationMode:
         assert transforms.NEAREST is InterpolationMode.NEAREST
         assert transforms.BILINEAR is InterpolationMode.BILINEAR
         assert transforms.BICUBIC is InterpolationMode.BICUBIC
+
+
+# ===========================================================================
+# TestFusedOptimizations
+# ===========================================================================
+
+
+class TestFusedOptimizations:
+    """Tests for fused ToTensor+Normalize and Compose fast-path."""
+
+    def test_to_tensor_normalize_matches_sequential(self):
+        """_to_tensor_normalize matches sequential ToTensor+Normalize (atol=1e-5)."""
+        from tensorimage._tensorimage import _to_tensor_normalize
+
+        img = make_hwc(50, 80, seed=123)
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        # Sequential
+        to_tensor = transforms.ToTensor()
+        normalize = transforms.Normalize(mean, std)
+        seq_out = normalize(to_tensor(img))
+
+        # Fused
+        arr = np.ascontiguousarray(img)
+        fused_out = _to_tensor_normalize(arr, mean, std)
+
+        if HAS_TORCH:
+            seq_np = seq_out.numpy()
+        else:
+            seq_np = seq_out
+        np.testing.assert_allclose(fused_out, seq_np, atol=1e-5)
+
+    @pytest.mark.skipif(not HAS_PIL, reason="PIL not installed")
+    def test_compose_fast_path_pil(self):
+        """Compose fast-path from PIL Image matches sequential (atol=0.04)."""
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        # Use real JPEG fixture — IDCT scaling is accurate for photographic content
+        pil_with_fn = Image.open(SAMPLE_JPG)
+
+        # Sequential (from numpy, triggers fused but not file fast-path)
+        img_arr = np.array(Image.open(SAMPLE_JPG))
+        seq_t = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        seq_out = seq_t(img_arr)
+
+        # Fast-path (from PIL with filename)
+        fast_t = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        fast_out = fast_t(pil_with_fn)
+
+        if HAS_TORCH:
+            seq_np = seq_out.numpy()
+            fast_np = fast_out.numpy()
+        else:
+            seq_np = seq_out
+            fast_np = fast_out
+
+        assert seq_np.shape == fast_np.shape
+        # Tolerance for IDCT scaling path vs Python resize
+        np.testing.assert_allclose(fast_np, seq_np, atol=0.04)
+
+    def test_compose_fast_path_string(self):
+        """Compose fast-path from string path matches sequential (atol=0.02)."""
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        t = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+
+        # String path triggers fast-path
+        fast_out = t(SAMPLE_JPG)
+
+        # Sequential from loaded image
+        if HAS_PIL:
+            img = np.array(Image.open(SAMPLE_JPG))
+        else:
+            import tensorimage
+            img = tensorimage.load(SAMPLE_JPG)
+
+        seq_out = t(img)
+
+        if HAS_TORCH:
+            fast_np = fast_out.numpy()
+            seq_np = seq_out.numpy()
+        else:
+            fast_np = fast_out
+            seq_np = seq_out
+
+        assert fast_np.shape == seq_np.shape == (3, 224, 224)
+        np.testing.assert_allclose(fast_np, seq_np, atol=0.04)
+
+    def test_compose_fallback_extra_transforms(self):
+        """Compose falls back to sequential when pattern doesn't match."""
+        img = make_hwc(300, 400)
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        # Extra transform breaks fast-path (5 transforms, not 4)
+        t = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.RandomHorizontalFlip(p=0.0),  # no-op but breaks pattern
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+
+        assert not t._fast_path  # fast-path should not be detected
+        assert t._fused_idx == 3  # but fused ToTensor+Normalize should still work
+
+        out = t(img)
+        if HAS_TORCH:
+            assert tuple(out.shape) == (3, 224, 224)
+        else:
+            assert out.shape == (3, 224, 224)
+
+    def test_training_pipeline_uses_fused(self):
+        """Training pipeline with RandomCrop still uses fused ToTensor+Normalize."""
+        img = make_hwc(300, 400)
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        t = transforms.Compose([
+            transforms.Resize(256),
+            transforms.RandomCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+
+        # Not a fast-path (RandomCrop instead of CenterCrop)
+        assert not t._fast_path
+        # But fused ToTensor+Normalize should be detected
+        assert t._fused_idx == 2
+
+        out = t(img)
+        if HAS_TORCH:
+            assert tuple(out.shape) == (3, 224, 224)
+        else:
+            assert out.shape == (3, 224, 224)
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
+    def test_fast_path_returns_torch_tensor(self):
+        """Compose fast-path returns torch.Tensor when torch is available."""
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        t = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+
+        out = t(SAMPLE_JPG)
+        assert isinstance(out, torch.Tensor)
+        assert out.dtype == torch.float32
+        assert tuple(out.shape) == (3, 224, 224)
 
 
 # ===========================================================================

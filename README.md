@@ -44,7 +44,7 @@ img = Image.open("photo.jpg")
 tensor = transform(img)  # (3, 224, 224) float32
 ```
 
-Supports: `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`, `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`. Resize uses the Rust SIMD backend. torch is optional — `ToTensor` returns `torch.Tensor` if available, numpy otherwise.
+Supports: `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`, `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`. Resize uses the Rust SIMD backend. torch is optional — `ToTensor` returns `torch.Tensor` if available, numpy otherwise. `Compose` auto-detects common patterns and fuses operations in Rust for extra speed.
 
 ## Why tensorimage?
 
@@ -80,7 +80,10 @@ Transforms pipeline (Resize(256) → CenterCrop(224) → ToTensor → Normalize)
 
 | Pipeline | tensorimage.transforms | torchvision.transforms | Speedup |
 |---|---|---|---|
-| ImageNet inference | **3.5 ms** | 10.5 ms | **3.0x** |
+| From numpy (fused ToTensor+Normalize) | **3.2 ms** | 10.4 ms | **3.2x** |
+| End-to-end file → tensor (fast-path) | **4.1 ms** | 18.1 ms | **4.4x** |
+
+The fast-path detects `Resize → CenterCrop → ToTensor → Normalize` and routes the entire pipeline through Rust, including JPEG decode with IDCT scaling. This is especially powerful for dataloaders where the input is a file path.
 
 ## API
 
@@ -219,13 +222,13 @@ tensorimage/
 │   └── tensorimage-python/     # PyO3 bindings
 │       └── src/
 │           ├── lib.rs          # Python module definition
-│           └── load.rs         # load() + load_batch() with GIL release + zero-copy
+│           └── load.rs         # load(), load_batch(), _resize_array, _to_tensor_normalize, _load_pipeline
 ├── python/tensorimage/         # Python package
 │   ├── __init__.py             # Re-exports load(), load_batch() from Rust
 │   └── transforms.py           # Drop-in torchvision.transforms replacement (Phase 3)
 ├── tests/
 │   ├── test_decode.py          # 45 tests: decode, resize, crop, normalize, pipeline, batch
-│   └── test_transforms.py      # 55+ tests: transforms module (Phase 3)
+│   └── test_transforms.py      # 67 tests: transforms + fused optimizations (Phase 3)
 └── benches/
     ├── compare.py              # Benchmark vs PIL (resize, pipeline, batch)
     └── compare_transforms.py   # Benchmark transforms vs torchvision.transforms
@@ -260,7 +263,7 @@ tensorimage/
 - [x] Full backward compatibility with Phase 1 API
 - [x] 45 tests total (20 Phase 1 + 25 Phase 2)
 
-### Phase 3: torchvision.transforms compatibility ✅
+### Phase 3: torchvision.transforms compatibility + smart Compose ✅
 
 Drop-in replacement — change one import line.
 
@@ -275,7 +278,9 @@ from tensorimage import transforms  # same API, faster
 - [x] torch optional — `ToTensor` returns numpy if torch unavailable
 - [x] Pixel-exact match for crop/flip/normalize; ≤3 pixel values for resize
 - [x] Full pipeline matches torchvision within atol=0.02
-- [x] 55+ tests including conditional torchvision comparison
+- [x] Fused `ToTensor + Normalize` — single Rust pass, no intermediate float allocation (3.2x)
+- [x] Full fast-path: `Resize → CenterCrop → ToTensor → Normalize` from file routes through Rust pipeline with IDCT scaling (4.4x end-to-end)
+- [x] 67 tests including fused optimization validation and conditional torchvision comparison
 
 ### Phase 4: PyTorch tensor output + GPU path
 

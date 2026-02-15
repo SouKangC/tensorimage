@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use tensorimage_core::crop::CropMode;
 use tensorimage_core::decode::DecodedImage;
 use tensorimage_core::error::TensorImageError;
-use tensorimage_core::normalize::NormalizeParams;
+use tensorimage_core::normalize::{NormalizeParams, normalize_hwc_to_chw};
 use tensorimage_core::pipeline::{PipelineConfig, PipelineOutput, execute_pipeline};
 use tensorimage_core::resize::{Algorithm, resize_exact};
 
@@ -190,6 +190,81 @@ fn build_output_list<'py>(
         }
     }
     Ok(list.into_any().unbind())
+}
+
+/// Fused ToTensor + Normalize: u8 HWC → f32 CHW in a single pass.
+/// Reuses `normalize_hwc_to_chw()` which pre-computes scale/bias for zero intermediate allocations.
+#[pyfunction]
+#[pyo3(signature = (array, mean, std))]
+pub fn _to_tensor_normalize<'py>(
+    py: Python<'py>,
+    array: PyReadonlyArray3<'py, u8>,
+    mean: [f32; 3],
+    std: [f32; 3],
+) -> PyResult<Py<PyAny>> {
+    let shape = array.shape();
+    let h = shape[0] as u32;
+    let w = shape[1] as u32;
+
+    let params = NormalizeParams::custom(mean, std).map_err(to_pyerr)?;
+
+    let data = array
+        .as_slice()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("Array must be contiguous"))?
+        .to_vec();
+
+    let image = DecodedImage {
+        data,
+        width: w,
+        height: h,
+        channels: 3,
+    };
+
+    let result = py.detach(|| normalize_hwc_to_chw(&image, &params));
+
+    let flat = PyArray1::from_vec(py, result);
+    let reshaped =
+        flat.reshape_with_order([3, h as usize, w as usize], numpy::npyffi::NPY_ORDER::NPY_CORDER)?;
+    Ok(reshaped.into_any().unbind())
+}
+
+/// Full Rust pipeline: decode → IDCT-scaled resize → center crop → fused normalize+transpose.
+/// Used by Compose fast-path for Resize(int) → CenterCrop → ToTensor → Normalize patterns.
+#[pyfunction]
+#[pyo3(signature = (path, size, crop_size, mean, std))]
+pub fn _load_pipeline<'py>(
+    py: Python<'py>,
+    path: &str,
+    size: u32,
+    crop_size: u32,
+    mean: [f32; 3],
+    std: [f32; 3],
+) -> PyResult<Py<PyAny>> {
+    let params = NormalizeParams::custom(mean, std).map_err(to_pyerr)?;
+    let config = PipelineConfig {
+        size: Some(size),
+        algorithm: Algorithm::Lanczos3,
+        crop: Some((CropMode::Center, crop_size, crop_size)),
+        normalize: Some(params),
+    };
+    let path_owned = path.to_string();
+
+    let result = py.detach(|| execute_pipeline(Path::new(&path_owned), &config));
+    let output = result.map_err(to_pyerr)?;
+
+    match output {
+        PipelineOutput::F32Chw { data, height, width } => {
+            let h = height as usize;
+            let w = width as usize;
+            let flat = PyArray1::from_vec(py, data);
+            let reshaped =
+                flat.reshape_with_order([3, h, w], numpy::npyffi::NPY_ORDER::NPY_CORDER)?;
+            Ok(reshaped.into_any().unbind())
+        }
+        PipelineOutput::U8Hwc(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "_load_pipeline always normalizes; unexpected U8Hwc output",
+        )),
+    }
 }
 
 /// Resize a numpy u8 HWC array using SIMD-accelerated resize.
