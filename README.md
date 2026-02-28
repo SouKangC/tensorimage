@@ -98,6 +98,10 @@ tensor = transform(img)  # (3, 224, 224) float32
 
 Supports: `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`, `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`. Resize uses the Rust SIMD backend. torch is optional -- `ToTensor` returns `torch.Tensor` if available, numpy otherwise. `Compose` auto-detects common patterns and fuses operations in Rust for extra speed.
 
+`Resize` accepts an optional `max_size` parameter to cap the longer edge after shortest-edge scaling: `Resize(256, max_size=512)`.
+
+**Compose fast-path conditions:** The full Rust pipeline (5.2x speedup) activates automatically when the pipeline is exactly `[Resize(int), CenterCrop(int), ToTensor, Normalize]` and the input to `__call__` is a file path string or a PIL Image that still has a `.filename` attribute set. For all other inputs or pipeline shapes the standard sequential path runs (with fused `ToTensor+Normalize` if that pair is present).
+
 ### Dataset filtering
 
 ```python
@@ -183,6 +187,14 @@ Load an image file and return a numpy array or torch.Tensor.
 
 **Returns:** `ndarray` `(H, W, 3)` uint8 without normalize, `(3, H, W)` float32 with normalize. `torch.Tensor` if `device` is set.
 
+**Normalize preset values:**
+
+| Preset | Mean (R, G, B) | Std (R, G, B) |
+|---|---|---|
+| `"imagenet"` | `[0.485, 0.456, 0.406]` | `[0.229, 0.224, 0.225]` |
+| `"clip"` | `[0.48145, 0.45783, 0.40821]` | `[0.26863, 0.26130, 0.27578]` |
+| `"[-1,1]"` | `[0.5, 0.5, 0.5]` | `[0.5, 0.5, 0.5]` |
+
 ### `ti.load_batch(paths, size=None, algorithm=None, crop=None, normalize=None, workers=None, device=None)`
 
 Load multiple images in parallel. Same parameters as `load()`, plus `workers` (default: CPU count).
@@ -214,6 +226,8 @@ Compute a 64-bit perceptual hash. Accepts a file path (`str`) or numpy array `(H
 
 Compute perceptual hashes for multiple images in parallel. Returns `list[int]`.
 
+Note: `phash_batch` accepts **file paths only**. To hash an in-memory numpy array use `ti.phash(array)` (single image).
+
 ### `ti.hamming_distance(a, b)`
 
 Hamming distance (number of differing bits) between two 64-bit hashes. Returns `int` (0 = identical, 64 = maximally different).
@@ -226,7 +240,7 @@ Find and group near-duplicate images by perceptual hash.
 |---|---|---|---|
 | `paths` | `list[str]` | required | Image file paths |
 | `algorithm` | `str` | `"dhash"` | `"dhash"` or `"phash"` |
-| `threshold` | `int` | `0` / `10` | Max Hamming distance to consider as duplicate |
+| `threshold` | `int` | `0` (dhash) / `10` (phash) | Max Hamming distance to consider as duplicate. Default is 0 for `"dhash"` (exact match only) and 10 for `"phash"`. |
 | `workers` | `int` | CPU count | Worker threads |
 
 **Returns:** `dict` with `"keep_indices"` (first of each group), `"duplicate_groups"` (groups with 2+ members), `"hashes"` (all hashes).
@@ -249,9 +263,36 @@ High-level dataset filtering pipeline. Applies filters cheapest-first.
 
 **Returns:** `dict` with `"paths"` (surviving paths), `"indices"` (original indices), `"stats"` (counts per stage).
 
+### `ti.aesthetic.AestheticScorer(model_name="ViT-L-14", pretrained="openai", device="cpu")`
+
+CLIP-based aesthetic scorer. Predicts a quality score (roughly 1–10) using CLIP ViT-L/14 features with a linear regression head trained on the LAION aesthetic dataset.
+
+Requires `pip install torch open_clip_torch`.
+
+**On first use**, the predictor weights (~3 MB) are downloaded from GitHub and cached at `~/.cache/tensorimage/aesthetic_predictor_v2.pth`. Subsequent calls use the cached file.
+
+```python
+from tensorimage.aesthetic import AestheticScorer
+
+scorer = AestheticScorer(device="cuda")   # or "cpu"
+score = scorer.score("photo.jpg")         # → float, e.g. 6.2
+scores = scorer.score_batch(["a.jpg", "b.jpg"], batch_size=32)  # → [6.2, 4.1]
+```
+
+| Method | Description |
+|---|---|
+| `score(path_or_image)` | Score a single image. Accepts a file path (`str`/`Path`) or `PIL.Image`. |
+| `score_batch(inputs, batch_size=32)` | Score a list of paths or PIL Images. Returns `list[float]`. |
+
+### `ti.image_info_batch(paths, workers=None)`
+
+Read image dimensions for multiple files without decoding (header-only, very fast). Returns a `list[(width, height)]`. Uses the shared rayon thread pool for parallelism. Useful as a cheap pre-filter before loading.
+
 ### `ti.to_dlpack(array)`
 
 Export a numpy array or torch tensor via DLPack for framework-agnostic interop.
+
+Requires **numpy >= 1.22** for numpy array inputs (numpy's `__dlpack__` protocol was added in 1.22). Older numpy versions will raise a `TypeError` with a version hint.
 
 ## How it works
 
@@ -279,6 +320,31 @@ numpy.ndarray (3, H, W) float32
 The GIL is released during all Rust work. Batch loading runs images in parallel via a persistent rayon thread pool.
 
 Key optimizations: fat LTO + `target-cpu=native` for cross-crate SIMD inlining, fused resize+crop in a single resampling pass, persistent thread pool via `OnceLock`, and contiguous batch output (`[N,3,H,W]` pre-allocated, each worker writes to its slice).
+
+## Platform support
+
+| Platform | Architecture | Status |
+|---|---|---|
+| Linux | x86_64 (AVX2) | Supported |
+| Linux | aarch64 (NEON) | Supported |
+| macOS | Apple Silicon (NEON) | Supported |
+| macOS | Intel x86_64 (AVX2) | Supported |
+| Windows | x86_64 (AVX2) | Supported |
+
+Requires **Python 3.8+** and **numpy**. torch is optional (needed for `device=` and `to_dlpack`). The wheel is self-contained — no system libjpeg, libpng, or libwebp required.
+
+## Error handling
+
+| Scenario | Behavior |
+|---|---|
+| Corrupt or truncated image | Raises `ValueError` with a descriptive message |
+| Unsupported format | Raises `ValueError` |
+| Corrupt image in `load_batch` | Raises `ValueError` and aborts the whole batch |
+| `crop` without `size` | Raises `ValueError` |
+| `normalize` preset not recognized | Raises `ValueError` listing valid options |
+| `deduplicate` / `filter_dataset` I/O error | The failing file is reported in the exception; the batch is aborted |
+
+All errors from Rust propagate as Python `ValueError` exceptions with human-readable messages.
 
 ## Building from source
 
