@@ -25,6 +25,9 @@ pub enum TensorImageError {
 
     #[error("Hash error: {0}")]
     Hash(String),
+
+    #[error("Augmentation error: {0}")]
+    Augment(String),
 }
 
 pub type Result<T> = std::result::Result<T, TensorImageError>;

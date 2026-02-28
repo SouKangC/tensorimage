@@ -12,3 +12,6 @@ manifest-path = "crates/tensorimage-python/Cargo.toml"
 module-name = "tensorimage._tensorimage"
 python-source = "python"
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+pythonpath = ["python"]

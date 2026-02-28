@@ -1,3 +1,4 @@
+pub mod augment;
 pub mod batch;
 pub mod crop;
 pub mod decode;

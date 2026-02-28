@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 
+mod augment;
 mod hash;
 mod load;
 
@@ -19,5 +20,8 @@ fn _tensorimage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hash::deduplicate, m)?)?;
     m.add_function(wrap_pyfunction!(hash::image_info, m)?)?;
     m.add_function(wrap_pyfunction!(hash::image_info_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(augment::_gaussian_blur, m)?)?;
+    m.add_function(wrap_pyfunction!(augment::_affine_transform, m)?)?;
+    m.add_function(wrap_pyfunction!(augment::_perspective_transform, m)?)?;
     Ok(())
 }
