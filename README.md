@@ -2,12 +2,13 @@
 
 Fast image loading for Python. Built in Rust.
 
-A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and normalizes images **6x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy. Includes parallel batch loading, a torchvision.transforms replacement with Rust-accelerated augmentations, and Rust-backed dataset filtering.
+A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and normalizes images **6x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy. Includes parallel batch loading, a torchvision.transforms replacement with Rust-accelerated augmentations, Dataset/DataLoader with **40x faster** training loops, and Rust-backed dataset filtering.
 
 ## Features
 
 - **6.6x faster** than PIL for full ML pipelines (resize + crop + normalize)
 - **47x faster** batch loading via parallel rayon thread pool
+- **40x faster DataLoader** — drop-in `ImageFolder` replacement with Rust rayon collation instead of Python multiprocessing
 - **Drop-in torchvision.transforms** replacement with auto-fused Rust fast-path
 - **Zero-copy** numpy output and PyTorch tensor support (`device="cpu"` / `"cuda"`)
 - **Dataset filtering** with perceptual hash dedup (3-27x faster than imagehash) and CLIP aesthetic scoring
@@ -79,6 +80,39 @@ tensor = torch.from_dlpack(ti.to_dlpack(arr))
 ```
 
 `device=None` (default) returns numpy arrays for full backward compatibility.
+
+### Drop-in ImageFolder & DataLoader (40x faster)
+
+```python
+import tensorimage as ti
+from tensorimage import transforms
+
+# Drop-in replacement for torchvision.datasets.ImageFolder
+dataset = ti.ImageFolder(
+    "data/imagenet/train",
+    transform=transforms.RandomHorizontalFlip(),  # per-image augmentations
+    size=224,                   # Rust: resize shortest edge to 224
+    crop="center",              # Rust: center crop to 224x224
+    normalize="imagenet",       # Rust: fused normalize + HWC->CHW
+)
+
+# Rust rayon handles all parallelism — no Python multiprocessing needed
+loader = ti.create_dataloader(dataset, batch_size=64, shuffle=True)
+
+for images, labels in loader:
+    # images: (64, 3, 224, 224) float32 tensor
+    # labels: (64,) long tensor
+    output = model(images.cuda())
+```
+
+Or from a flat list of paths (no directory structure required):
+
+```python
+dataset = ti.ImageDataset(paths, labels, size=224, crop="center", normalize="imagenet")
+loader = ti.create_dataloader(dataset, batch_size=32)
+```
+
+Key design: `__getitem__` returns `(path, label)` instead of `(image, label)`. The custom `collate_fn` batch-loads all images in one `ti.load_batch()` call, leveraging Rust rayon parallelism. This eliminates Python multiprocessing overhead entirely — `num_workers=0` by default.
 
 ### Drop-in torchvision.transforms replacement
 
@@ -158,6 +192,19 @@ Resize(256) -> CenterCrop(224) -> ToTensor -> Normalize, 4000x2000 JPEG:
 | From numpy (fused ToTensor+Normalize) | **3.2 ms** | 10.4 ms | **3.2x** |
 | End-to-end file -> tensor (fast-path) | **3.5 ms** | 18.2 ms | **5.2x** |
 
+### DataLoader (vs torchvision.datasets.ImageFolder)
+
+Full training loop: ImageFolder + DataLoader, Resize(224) + CenterCrop(224) + RandomHorizontalFlip + Normalize, 256 images:
+
+| DataLoader | Epoch time | Throughput | Speedup |
+|---|---|---|---|
+| **tensorimage** (num_workers=0, rayon) | **87 ms** | **2,939 img/s** | **40x** |
+| torchvision (num_workers=0) | 3,513 ms | 73 img/s | 1x |
+| torchvision (num_workers=2) | 12,865 ms | 20 img/s | 0.2x |
+| torchvision (num_workers=4) | 22,300 ms | 11 img/s | 0.1x |
+
+tensorimage's `ImageFolder` defers image loading to the `collate_fn`, which calls `ti.load_batch()` for Rust rayon parallel decoding. This eliminates Python multiprocessing overhead entirely. torchvision's multi-worker DataLoader actually gets *slower* due to process spawn, IPC serialization, and GIL contention — tensorimage avoids all of this by doing parallelism in Rust with `num_workers=0`.
+
 ### Perceptual hashing (vs imagehash)
 
 | Task | tensorimage | imagehash | Speedup |
@@ -212,6 +259,36 @@ Load multiple images from raw bytes in parallel. Same parameters as `load_batch(
 ### `ti.image_info(path)`
 
 Read image dimensions without decoding (header-only, very fast). Returns `(width, height)` tuple.
+
+### `ti.ImageFolder(root, transform=None, size=None, crop=None, normalize=None, device="cpu")`
+
+Drop-in replacement for `torchvision.datasets.ImageFolder`. Walks `root/` directory, discovers images (`.jpg`, `.jpeg`, `.png`, `.webp`, `.avif`) in class subdirectories (sorted alphabetically).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `root` | `str` | required | Root directory with class subdirectories |
+| `transform` | callable | `None` | Per-image augmentation (applied after Rust batch decode) |
+| `size` | `int` | `None` | Resize shortest edge (passed to `ti.load_batch`) |
+| `crop` | `str` | `None` | `"center"` = center crop to `size x size` |
+| `normalize` | `str` | `None` | `"imagenet"`, `"clip"`, or `"[-1,1]"` |
+| `device` | `str` | `"cpu"` | Tensor device |
+
+**Attributes:** `classes`, `class_to_idx`, `samples` (list of `(path, label)`), `targets`, `imgs` (alias for `samples`).
+
+**`__getitem__`** returns `(path, label)` — image loading is deferred to the collate function.
+
+### `ti.ImageDataset(paths, labels=None, transform=None, size=None, crop=None, normalize=None, device="cpu")`
+
+Generic dataset from a list of image paths (no directory structure required). Same interface as `ImageFolder` but accepts explicit paths and labels.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `paths` | `list[str]` | required | Image file paths |
+| `labels` | `list[int]` | `None` | Labels (defaults to all zeros) |
+
+### `ti.create_dataloader(dataset, batch_size=32, shuffle=True, drop_last=False, **kwargs)`
+
+Convenience function that creates a `torch.utils.data.DataLoader` with `num_workers=0` and the dataset's Rust-backed `collate_fn`. All parallelism is handled by Rust rayon.
 
 ### `ti.phash(path_or_array, algorithm="dhash")`
 
@@ -392,16 +469,16 @@ tensorimage/
 ├── python/tensorimage/         # Python package
 │   ├── __init__.py             # Public API
 │   ├── transforms.py           # torchvision.transforms replacement
+│   ├── data.py                 # ImageFolder, ImageDataset, DataLoader integration
 │   └── aesthetic.py            # CLIP aesthetic scoring (optional)
-├── tests/                      # 229 tests
+├── tests/                      # 257 tests
 └── benches/                    # Benchmarks vs PIL and torchvision
 ```
 
 ## Roadmap
 
-Phases 1-5, 7, 8, and 9 are complete. Upcoming:
+Phases 1-5, 7-10 are complete. Upcoming:
 
-- **Phase 10**: PyTorch Dataset & DataLoader integration (`ImageFolder`, `ImageDataset`, optimized collation)
 - **Phase 6**: GPU decode via NVJPEG — end-to-end CUDA pipeline
 - **Phase 11**: Streaming I/O (TAR shards, WebDataset, HTTP/URL loading) for large-scale training
 - **Phase 12**: Video frame extraction via FFmpeg
