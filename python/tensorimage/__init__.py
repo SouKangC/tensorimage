@@ -26,6 +26,9 @@ __all__ = [
     "hamming_distance",
     "deduplicate",
     "filter_dataset",
+    "ImageFolder",
+    "ImageDataset",
+    "create_dataloader",
 ]
 
 
@@ -352,3 +355,6 @@ def filter_dataset(
         "indices": surviving,
         "stats": stats,
     }
+
+
+from tensorimage.data import ImageFolder, ImageDataset, create_dataloader

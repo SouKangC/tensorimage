@@ -127,15 +127,15 @@ End-to-end GPU pipeline: file → CUDA tensor with no CPU→GPU copies. `pip ins
 - [x] All exposed via `tensorimage.transforms`, same API patterns as torchvision
 - [x] 42 new tests including torchvision comparison (229 total)
 
-## Phase 10: PyTorch Dataset & DataLoader integration
+## Phase 10: PyTorch Dataset & DataLoader integration ✅
 
 `ti.ImageFolder(root, transform)` — drop-in `torchvision.datasets.ImageFolder` replacement.
 
-- [ ] `ti.ImageFolder(root, transform=None)` — walks directory, class labels from subdirectory names
-- [ ] `ti.ImageDataset(paths, labels=None, transform=None)` — generic dataset from path list
-- [ ] `ti.collate_fn` — optimized collation using `ti.load_batch()` under the hood
-- [ ] Integration with `torch.utils.data.DataLoader` (`num_workers`, `prefetch_factor`)
-- [ ] Pure Python — no Rust changes, uses existing `ti.load()` and `ti.load_batch()`
+- [x] `ti.ImageFolder(root, transform=None)` — walks directory, class labels from subdirectory names
+- [x] `ti.ImageDataset(paths, labels=None, transform=None)` — generic dataset from path list
+- [x] `ti.collate_fn` — optimized collation using `ti.load_batch()` under the hood
+- [x] Integration with `torch.utils.data.DataLoader` (`num_workers=0`, rayon handles parallelism)
+- [x] Pure Python — no Rust changes, uses existing `ti.load()` and `ti.load_batch()`
 
 ## Phase 11: Streaming I/O & large-scale datasets
 
