@@ -109,22 +109,23 @@ End-to-end GPU pipeline: file → CUDA tensor with no CPU→GPU copies. `pip ins
 - [x] Refactored `pipeline.rs` to share resize/crop logic between file and bytes paths
 - [x] 21 new tests (187 total): WebP loading, EXIF orientations, bytes API, batch bytes, image_info
 
-## Phase 9: Rust-accelerated augmentations
+## Phase 9: Rust-accelerated augmentations ✅
 
-Rust-backed GaussianBlur, affine transforms, and more — the missing 60% of preprocessing time.
+`transforms.GaussianBlur(5, sigma=1.5)` — Rust-backed spatial transforms, plus numpy augmentations.
 
-- [ ] **GaussianBlur** — separable 2D convolution in Rust (SIMD-friendly O(n*k) per axis)
-- [ ] **RandomRotation** — bilinear-interpolated affine warp in Rust
-- [ ] **RandomAffine** — rotation + translation + scale + shear, single resampling pass
-- [ ] **RandomPerspective** — 3x3 homography warp in Rust
-- [ ] **RandomErasing** / Cutout — zero-fill or noise-fill random rectangle (Python/numpy)
-- [ ] **Grayscale** / **RandomGrayscale** — weighted channel average (Python/numpy)
-- [ ] **GaussianNoise** — additive Gaussian noise (Python/numpy)
-- [ ] **Pad** — constant/reflect/replicate padding (Python/numpy)
-- [ ] **ElasticTransform** — grid-based displacement (Python/numpy)
-- [ ] New module: `crates/tensorimage-core/src/augment.rs`
-- [ ] New module: `crates/tensorimage-python/src/augment.rs` (PyO3 bindings)
-- [ ] All exposed via `tensorimage.transforms`, same API patterns as torchvision
+- [x] **GaussianBlur** — separable 2D convolution in Rust (SIMD-friendly O(n*k) per axis)
+- [x] **RandomRotation** — bilinear-interpolated affine warp in Rust (torchvision-compatible direction)
+- [x] **RandomAffine** — rotation + translation + scale + shear, single resampling pass
+- [x] **RandomPerspective** — 3x3 homography warp in Rust with bilinear sampling
+- [x] **RandomErasing** / Cutout — zero-fill or noise-fill random rectangle (Python/numpy, CHW float)
+- [x] **Grayscale** / **RandomGrayscale** — BT.601 weighted channel average (Python/numpy)
+- [x] **GaussianNoise** — additive Gaussian noise, supports both HWC uint8 and CHW float32
+- [x] **Pad** — constant/reflect/edge padding (Python/numpy)
+- [x] **ElasticTransform** — grid-based displacement with Gaussian smoothing (Python/numpy)
+- [x] New module: `crates/tensorimage-core/src/augment.rs`
+- [x] New module: `crates/tensorimage-python/src/augment.rs` (PyO3 bindings, GIL released)
+- [x] All exposed via `tensorimage.transforms`, same API patterns as torchvision
+- [x] 42 new tests including torchvision comparison (229 total)
 
 ## Phase 10: PyTorch Dataset & DataLoader integration
 

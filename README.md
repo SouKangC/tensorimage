@@ -2,7 +2,7 @@
 
 Fast image loading for Python. Built in Rust.
 
-A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and normalizes images **6x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy. Includes parallel batch loading, a torchvision.transforms replacement, and Rust-backed dataset filtering.
+A drop-in replacement for `PIL.Image.open()` that decodes, resizes, crops, and normalizes images **6x+ faster** using libjpeg-turbo SIMD decoding, IDCT downscaling, and hardware-accelerated resize. Returns numpy arrays with zero-copy. Includes parallel batch loading, a torchvision.transforms replacement with Rust-accelerated augmentations, and Rust-backed dataset filtering.
 
 ## Features
 
@@ -96,7 +96,7 @@ img = Image.open("photo.jpg")
 tensor = transform(img)  # (3, 224, 224) float32
 ```
 
-Supports: `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`, `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`. Resize uses the Rust SIMD backend. torch is optional -- `ToTensor` returns `torch.Tensor` if available, numpy otherwise. `Compose` auto-detects common patterns and fuses operations in Rust for extra speed.
+Supports: `Compose`, `Resize`, `CenterCrop`, `RandomCrop`, `ToTensor`, `Normalize`, `RandomHorizontalFlip`, `RandomVerticalFlip`, `ColorJitter`, `GaussianBlur`, `RandomRotation`, `RandomAffine`, `RandomPerspective`, `RandomErasing`, `Grayscale`, `RandomGrayscale`, `GaussianNoise`, `Pad`, `ElasticTransform`. Resize, GaussianBlur, and spatial transforms (rotation, affine, perspective) use the Rust SIMD backend. torch is optional -- `ToTensor` returns `torch.Tensor` if available, numpy otherwise. `Compose` auto-detects common patterns and fuses operations in Rust for extra speed.
 
 `Resize` accepts an optional `max_size` parameter to cap the longer edge after shortest-edge scaling: `Resize(256, max_size=512)`.
 
@@ -381,25 +381,26 @@ tensorimage/
 │   │       ├── phash.rs        # Perceptual hashing (dHash, pHash)
 │   │       ├── dedup.rs        # Parallel deduplication
 │   │       ├── jpeg_info.rs    # Header-only dimension read
+│   │       ├── augment.rs      # Gaussian blur, affine/perspective transforms
 │   │       └── error.rs        # Error types
 │   └── tensorimage-python/     # PyO3 bindings
 │       └── src/
 │           ├── lib.rs          # Python module definition
 │           ├── load.rs         # Image loading bindings
-│           └── hash.rs         # Hash and dedup bindings
+│           ├── hash.rs         # Hash and dedup bindings
+│           └── augment.rs      # Augmentation bindings (blur, affine, perspective)
 ├── python/tensorimage/         # Python package
 │   ├── __init__.py             # Public API
 │   ├── transforms.py           # torchvision.transforms replacement
 │   └── aesthetic.py            # CLIP aesthetic scoring (optional)
-├── tests/                      # 187 tests
+├── tests/                      # 229 tests
 └── benches/                    # Benchmarks vs PIL and torchvision
 ```
 
 ## Roadmap
 
-Phases 1-5, 7, and 8 are complete. Upcoming:
+Phases 1-5, 7, 8, and 9 are complete. Upcoming:
 
-- **Phase 9**: Rust-accelerated augmentations (GaussianBlur, RandomRotation, RandomAffine, and more)
 - **Phase 10**: PyTorch Dataset & DataLoader integration (`ImageFolder`, `ImageDataset`, optimized collation)
 - **Phase 6**: GPU decode via NVJPEG — end-to-end CUDA pipeline
 - **Phase 11**: Streaming I/O (TAR shards, WebDataset, HTTP/URL loading) for large-scale training
